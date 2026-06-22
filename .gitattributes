@@ -1,0 +1,10 @@
+# Normalizar finales de línea: en el repositorio siempre LF, para que el grupo no
+# pelee con diferencias CRLF/LF entre Windows, macOS y Linux.
+* text=auto eol=lf
+
+# Binarios (por si más adelante se agregan imágenes/diagramas/PDFs).
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.pdf binary

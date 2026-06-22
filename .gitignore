@@ -1,0 +1,15 @@
+# Repo del TP (monorepo). El backend tiene su propio booking/.gitignore que cubre
+# _build/, deps/, *.ez, etc. Acá solo van reglas generales del sistema y del editor.
+
+# Archivos del sistema operativo
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editores / IDE
+*.swp
+*~
+.idea/
+
+# Archivos temporales sueltos
+*.tmp
