@@ -90,6 +90,23 @@ Así nunca quedan procesos colgados de un `Registry` que ya no existe."
 **Alternativa descartada:** `:one_for_one` (más simple, pero dejaría los `FlightServer`
 inconsistentes ante una caída de `Registry`/`Persistence`).
 
+### D5 — Ids de reserva generados por el `FlightServer` (contador legible)
+**Decisión:** el `FlightServer` (la cáscara con efectos sobre `Booking.Flight`) genera los
+ids de reserva con un **contador por vuelo**: `"<flight_id>-r<n>"` (ej. `"AR1001-r1"`).
+Son únicos entre vuelos porque el `flight_id` lo es, y legibles para la demo y el coloquio.
+
+**Por qué:** generar un id es un efecto (no determinista) → vive en el proceso, no en el
+dominio puro. Un contador en el estado del GenServer es simple y se serializa solo (el
+proceso atiende los pedidos de a uno).
+
+**Deuda a saldar en la etapa de persistencia:** el contador (`seq`) vive en memoria. Al
+reiniciar el servidor y recargar las reservas desde DETS hay que **restaurar
+`seq = max(n existente) + 1`** (el mayor sufijo numérico entre las reservas ya
+persistidas, más uno) para que los ids nuevos **no colisionen** con los ya emitidos.
+Mientras no haya persistencia, `seq` arranca en 1.
+
+**Alternativa:** id aleatorio (`System.unique_integer`) — sin esa deuda, pero menos legible.
+
 ---
 
 ## Defaults menores — **A CONFIRMAR CON EL GRUPO**
