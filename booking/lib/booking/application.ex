@@ -9,15 +9,18 @@ defmodule Booking.Application do
   def start(_type, _args) do
     # Árbol de supervisión. El árbol consolidado está en docs/arquitectura.md.
     children = [
-      # Registry: índice {:flight, id} -> pid del FlightServer. Arranca primero porque
-      # los FlightServer se registran en él al nacer.
+      # Persistence: único dueño de las tablas DETS. Arranca primero: los FlightServer
+      # escriben a través de él (write-through).
+      Booking.Persistence,
+      # Registry: índice {:flight, id} -> pid del FlightServer. Los FlightServer se
+      # registran en él al nacer.
       {Registry, keys: :unique, name: Booking.Registry},
       # DynamicSupervisor: crea/supervisa un FlightServer por vuelo, bajo demanda.
       Booking.FlightSupervisor
     ]
 
-    # :rest_for_one → si el Registry cae, se reinician también los que arrancaron después
-    # (el FlightSupervisor y sus vuelos), que se re-registran. Ver docs/DECISIONES.md D4.
+    # :rest_for_one → si una pieza base (Persistence/Registry) cae, se reinician también
+    # los que arrancaron después (el FlightSupervisor y sus vuelos). Ver docs/DECISIONES.md.
     opts = [strategy: :rest_for_one, name: Booking.Supervisor]
     Supervisor.start_link(children, opts)
   end

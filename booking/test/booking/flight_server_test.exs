@@ -1,7 +1,7 @@
 defmodule Booking.FlightServerTest do
   use ExUnit.Case, async: true
 
-  alias Booking.{Flight, FlightServer}
+  alias Booking.{Flight, FlightServer, Persistence}
 
   # Arranca un FlightServer supervisado por el test (se limpia solo al terminar).
   # `opts` puede incluir `:seat_count` y `:ttl_ms` (TTL corto para forzar expiración).
@@ -17,7 +17,9 @@ defmodule Booking.FlightServerTest do
         seat_count: Keyword.get(opts, :seat_count, 20)
       })
 
-    start_supervised!({FlightServer, [flight: flight] ++ Keyword.take(opts, [:ttl_ms])})
+    start_supervised!(
+      {FlightServer, [flight: flight] ++ Keyword.take(opts, [:ttl_ms, :persistence])}
+    )
   end
 
   test "reservar a través del server marca el asiento y devuelve la reserva pendiente" do
@@ -130,6 +132,39 @@ defmodule Booking.FlightServerTest do
 
       assert {:error, :not_pending} = FlightServer.confirm(server, res.id)
       assert FlightServer.get_flight(server).seats["1"].status == :free
+    end
+  end
+
+  describe "write-through (persistencia)" do
+    @tag :tmp_dir
+    test "cada cambio de reserva se persiste con su estado actualizado", %{tmp_dir: tmp_dir} do
+      pname = :"persistence_#{System.unique_integer([:positive])}"
+      start_supervised!({Persistence, name: pname, dir: tmp_dir})
+      server = start_server(persistence: pname)
+
+      {:ok, res} = FlightServer.reserve_seat(server, "1", "ana")
+      assert [stored] = Persistence.get_reservations(pname)
+      assert stored.id == res.id
+      assert stored.status == :pending
+
+      {:ok, _} = FlightServer.confirm(server, res.id)
+      assert [stored] = Persistence.get_reservations(pname)
+      assert stored.status == :confirmed
+    end
+
+    @tag :tmp_dir
+    test "la expiración también se persiste (queda :expired en Persistence)", %{tmp_dir: tmp_dir} do
+      pname = :"persistence_#{System.unique_integer([:positive])}"
+      start_supervised!({Persistence, name: pname, dir: tmp_dir})
+      server = start_server(ttl_ms: 30, persistence: pname)
+
+      {:ok, res} = FlightServer.reserve_seat(server, "1", "ana")
+      Process.sleep(80)
+
+      # La expiración real disparó el timer -> handle_info -> persist(:expired).
+      assert [stored] = Persistence.get_reservations(pname)
+      assert stored.id == res.id
+      assert stored.status == :expired
     end
   end
 end

@@ -107,6 +107,27 @@ Mientras no haya persistencia, `seq` arranca en 1.
 
 **Alternativa:** id aleatorio (`System.unique_integer`) — sin esa deuda, pero menos legible.
 
+### D6 — Persistencia: un único `Persistence` dueño de DETS, write-through sincrónico
+**Decisión:** un solo proceso `Booking.Persistence` (GenServer) es dueño de las tablas DETS
+(`users`, `flights`, `reservations`); todos leen y escriben **a través de él**. Cada cambio
+de reserva en un `FlightServer` se persiste de forma **sincrónica** (write-through: se
+guarda **antes** de responderle al cliente).
+
+**Por qué un único dueño:**
+- DETS no soporta escritura concurrente sin coordinación: varios procesos sobre el mismo
+  archivo pueden **corromperlo**. Con un solo dueño, **todas las escrituras se serializan**
+  ahí → consistencia, sin locks. Es el mismo trade-off "single owner" del resumen.
+- A la escala del TP el costo de serializar es **despreciable** (escrituras DETS rápidas,
+  volumen bajo). Si alguna vez hubiera que escalar, se **particiona** (p. ej. una partición
+  por aerolínea o por rango de vuelos); no se rompe el invariante.
+
+**Por qué sincrónico:** se persiste antes de responder, así al usuario se le confirma una
+operación recién cuando ya quedó en disco (sostiene "tras reiniciar no se pierden reservas").
+
+**Cómo se defiende:** "Un proceso dueño de DETS evita la corrupción y serializa la E/S; el
+write-through sincrónico da durabilidad antes de confirmarle al cliente. El costo es mínimo
+a esta escala y, de hacer falta, se particiona."
+
 ---
 
 ## Defaults menores — **A CONFIRMAR CON EL GRUPO**

@@ -30,9 +30,11 @@ defmodule Booking.FlightSupervisor do
   """
   @spec start_flight(Flight.t()) :: DynamicSupervisor.on_start_child()
   def start_flight(%Flight{} = flight) do
+    # Inyecta el Persistence singleton: los FlightServer de producción persisten
+    # (write-through); los que se arrancan sueltos en tests no (persistence: nil por defecto).
     DynamicSupervisor.start_child(
       __MODULE__,
-      {FlightServer, flight: flight, name: via(flight.id)}
+      {FlightServer, flight: flight, name: via(flight.id), persistence: Booking.Persistence}
     )
   end
 
