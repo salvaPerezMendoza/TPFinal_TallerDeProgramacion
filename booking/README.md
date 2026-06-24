@@ -16,6 +16,24 @@ mix test          # corre los tests
 iex -S mix        # levanta la aplicación en una consola interactiva
 ```
 
+## Probar el WebSocket (wscat)
+
+Con la app levantada (`iex -S mix`; el listener queda en `ws://localhost:4000/ws`), desde
+otra terminal:
+
+```sh
+npx wscat -c ws://localhost:4000/ws
+```
+
+Ya conectado, escribí el mensaje y Enter (en modo interactivo no hay líos de comillas):
+
+```json
+{"type":"list_flights"}
+```
+
+Devuelve `{"type":"flights","flights":[...]}` con los vuelos sembrados. El protocolo completo
+está en [`../docs/protocolo.md`](../docs/protocolo.md).
+
 ## Demo: forzar un rechazo de pago
 
 El pago simulado tiene una tasa de éxito configurable (`:payment_success_rate`, por defecto

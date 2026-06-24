@@ -19,7 +19,10 @@ defmodule Booking.Application do
       Booking.FlightSupervisor,
       # Task.Supervisor de los pagos simulados (Tasks efímeras que lanzan los FlightServer).
       # Va después de FlightSupervisor: un crash suyo no debe reiniciar los vuelos.
-      {Task.Supervisor, name: Booking.PaymentSupervisor}
+      {Task.Supervisor, name: Booking.PaymentSupervisor},
+      # WebEndpoint (Cowboy): listener WebSocket. Último: solo aceptamos conexiones con el
+      # dominio ya arriba.
+      Booking.WebEndpoint
     ]
 
     # :rest_for_one → si una pieza base (Persistence/Registry) cae, se reinician también
