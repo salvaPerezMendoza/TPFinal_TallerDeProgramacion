@@ -282,4 +282,53 @@ defmodule Booking.FlightServerTest do
       assert FlightServer.get_flight(s2).reservations[r2.id].status == :confirmed
     end
   end
+
+  describe "pago simulado" do
+    test "pago OK confirma la reserva" do
+      server = start_server()
+      {:ok, res} = FlightServer.reserve_seat(server, "1", "ana")
+
+      assert {:ok, :processing} = FlightServer.pay(server, res.id, force: :ok, delay: 10)
+      Process.sleep(40)
+
+      flight = FlightServer.get_flight(server)
+      assert flight.reservations[res.id].status == :confirmed
+      assert flight.seats["1"].status == :confirmed
+    end
+
+    test "un pago que llega después de expirar NO confirma (queda :expired)" do
+      server = start_server(ttl_ms: 30)
+      {:ok, res} = FlightServer.reserve_seat(server, "1", "ana")
+
+      # delay del pago (100 ms) > ttl (30 ms): la expiración entra primero.
+      assert {:ok, :processing} = FlightServer.pay(server, res.id, force: :ok, delay: 100)
+      Process.sleep(160)
+
+      flight = FlightServer.get_flight(server)
+      assert flight.reservations[res.id].status == :expired
+      assert flight.seats["1"].status == :free
+    end
+
+    test "pago rechazado: la reserva sigue :pending" do
+      server = start_server()
+      {:ok, res} = FlightServer.reserve_seat(server, "1", "ana")
+
+      assert {:ok, :processing} = FlightServer.pay(server, res.id, force: :error, delay: 10)
+      Process.sleep(40)
+
+      flight = FlightServer.get_flight(server)
+      assert flight.reservations[res.id].status == :pending
+      assert flight.seats["1"].status == :reserved
+    end
+
+    test "doble-pay: el segundo pago concurrente es rechazado" do
+      server = start_server()
+      {:ok, res} = FlightServer.reserve_seat(server, "1", "ana")
+
+      assert {:ok, :processing} = FlightServer.pay(server, res.id, force: :ok, delay: 50)
+
+      assert {:error, :payment_in_progress} =
+               FlightServer.pay(server, res.id, force: :ok, delay: 50)
+    end
+  end
 end

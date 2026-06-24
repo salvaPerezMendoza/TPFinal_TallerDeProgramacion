@@ -16,6 +16,20 @@ mix test          # corre los tests
 iex -S mix        # levanta la aplicación en una consola interactiva
 ```
 
+## Demo: forzar un rechazo de pago
+
+El pago simulado tiene una tasa de éxito configurable (`:payment_success_rate`, por defecto
+`1.0` = siempre confirma, para que la demo no dependa del azar). Para mostrar el camino de
+**pago rechazado**, bajá el knob en una consola `iex -S mix`:
+
+```elixir
+Application.put_env(:booking, :payment_success_rate, 0.0)   # 0.0 = siempre rechaza
+# ... hacé un pago en la UI: la reserva sigue pendiente hasta que vence ...
+Application.put_env(:booking, :payment_success_rate, 1.0)   # volver a "siempre confirma"
+```
+
+(También puede fijarse en `config/config.exs`.)
+
 ## Verificación antes de commitear
 
 ```sh

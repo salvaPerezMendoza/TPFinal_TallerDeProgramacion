@@ -15,12 +15,17 @@ defmodule Booking.FlightServer do
       viene de esa re-validación;
     * **persiste** (write-through) cada cambio de reserva en `Booking.Persistence`, de
       forma sincrónica (guarda antes de responderle al cliente). Solo si se le inyectó un
-      `:persistence` (lo hace el `FlightSupervisor`); sin él es no-op.
+      `:persistence` (lo hace el `FlightSupervisor`); sin él es no-op;
+    * **cobra** (pago simulado): `pay` lanza una `Task` supervisada (`Booking.PaymentSupervisor`)
+      que duerme 1-5 s y le manda `{:payment_result, id, result}`. La Task no confirma sola; el
+      proceso confirma solo si la reserva sigue `:pending` (re-validación). El timer de
+      expiración sigue corriendo durante el pago, así la carrera pago-vs-expiración se resuelve
+      sola. Ver docs/DECISIONES.md D7.
 
   Estado del proceso: `%{flight: %Booking.Flight{}, seq: pos_integer, ttl_ms: pos_integer,
-  persistence: GenServer.server() | nil, timers: %{reservation_id => reference}}`. El
-  dominio decide *qué* pasa; este módulo aporta *cuándo*, *con qué identidad* y *dónde se
-  guarda*.
+  persistence: GenServer.server() | nil, timers: %{reservation_id => reference},
+  payments: MapSet.t()}` (`payments` = reservas con un pago en vuelo). El dominio decide *qué*
+  pasa; este módulo aporta *cuándo*, *con qué identidad* y *dónde se guarda*.
   """
 
   use GenServer
@@ -65,6 +70,19 @@ defmodule Booking.FlightServer do
     GenServer.call(server, {:cancel, reservation_id})
   end
 
+  @doc """
+  Inicia el pago simulado de una reserva pendiente: lanza una `Task` supervisada que, tras
+  1-5 s, le manda el resultado al `FlightServer` (que confirma si la reserva sigue pendiente).
+  Devuelve `{:ok, :processing}` (es asíncrono). `opts` admite `:force` (`:ok`/`:error`) y
+  `:delay` (ms) para tests.
+  """
+  @spec pay(GenServer.server(), String.t(), keyword()) ::
+          {:ok, :processing}
+          | {:error, :reservation_not_found | :not_pending | :payment_in_progress}
+  def pay(server, reservation_id, opts \\ []) do
+    GenServer.call(server, {:pay, reservation_id, opts})
+  end
+
   @doc "Devuelve el `%Booking.Flight{}` actual (inspección / detalle del vuelo)."
   @spec get_flight(GenServer.server()) :: Flight.t()
   def get_flight(server), do: GenServer.call(server, :get_flight)
@@ -87,7 +105,8 @@ defmodule Booking.FlightServer do
       seq: next_seq(reservations),
       ttl_ms: ttl_ms,
       persistence: persistence,
-      timers: timers
+      timers: timers,
+      payments: MapSet.new()
     }
 
     # Las :pending ya vencidas se reconstruyeron como :expired → persistir esa corrección.
@@ -133,6 +152,27 @@ defmodule Booking.FlightServer do
   end
 
   @impl true
+  def handle_call({:pay, reservation_id, opts}, _from, state) do
+    case Map.get(state.flight.reservations, reservation_id) do
+      %Reservation{status: :pending} ->
+        if MapSet.member?(state.payments, reservation_id) do
+          # Doble-pay: ya hay una Task de pago en vuelo para esta reserva.
+          {:reply, {:error, :payment_in_progress}, state}
+        else
+          start_payment_task(self(), reservation_id, opts)
+          state = %{state | payments: MapSet.put(state.payments, reservation_id)}
+          {:reply, {:ok, :processing}, state}
+        end
+
+      nil ->
+        {:reply, {:error, :reservation_not_found}, state}
+
+      %Reservation{} ->
+        {:reply, {:error, :not_pending}, state}
+    end
+  end
+
+  @impl true
   def handle_call(:get_flight, _from, state) do
     {:reply, state.flight, state}
   end
@@ -156,18 +196,66 @@ defmodule Booking.FlightServer do
     end
   end
 
-  # Traduce el resultado de una transición pura (confirm/cancel) a la respuesta del
-  # cliente: en éxito guarda el vuelo nuevo, cancela el timer de expiración (optimización)
-  # y devuelve la reserva actualizada.
+  @impl true
+  def handle_info({:payment_result, reservation_id, result}, state) do
+    state = %{state | payments: MapSet.delete(state.payments, reservation_id)}
+    {:noreply, apply_payment(result, reservation_id, state)}
+  end
+
+  # Pago aprobado: confirma SOLO si la reserva sigue :pending. Si entre el inicio del pago y
+  # este resultado la reserva expiró/canceló, Flight.confirm devuelve {:error, :not_pending} y
+  # el pago tardío es no-op (así se resuelve la carrera pago-vs-expiración).
+  defp apply_payment(:ok, reservation_id, state) do
+    case Flight.confirm(state.flight, reservation_id) do
+      {:ok, %Flight{} = flight} ->
+        {_reservation, state} = apply_ok(flight, reservation_id, state)
+        state
+
+      {:error, _reason} ->
+        state
+    end
+  end
+
+  # Pago rechazado: la reserva sigue :pending (su timer sigue corriendo hasta vencer).
+  defp apply_payment(:error, _reservation_id, state), do: state
+
+  # Lanza la Task supervisada que simula el pago: duerme `delay` y manda el resultado de
+  # vuelta. El resultado se decide acá (force en tests, o random según payment_success_rate
+  # en prod); la Task NO confirma, solo avisa.
+  defp start_payment_task(flight_server, reservation_id, opts) do
+    delay = Keyword.get(opts, :delay, Enum.random(1000..5000))
+    result = Keyword.get(opts, :force) || payment_result()
+
+    Task.Supervisor.start_child(Booking.PaymentSupervisor, fn ->
+      Process.sleep(delay)
+      send(flight_server, {:payment_result, reservation_id, result})
+    end)
+  end
+
+  defp payment_result do
+    if :rand.uniform() <= Application.get_env(:booking, :payment_success_rate, 1.0),
+      do: :ok,
+      else: :error
+  end
+
+  # Traduce el resultado de una transición pura (confirm/cancel) a la respuesta del cliente.
   defp reply_transition({:ok, %Flight{} = flight}, reservation_id, state) do
-    reservation = Map.fetch!(flight.reservations, reservation_id)
-    state = %{state | flight: flight, timers: cancel_timer(state.timers, reservation_id)}
-    persist(state, reservation)
+    {reservation, state} = apply_ok(flight, reservation_id, state)
     {:reply, {:ok, reservation}, state}
   end
 
   defp reply_transition({:error, reason}, _reservation_id, state) do
     {:reply, {:error, reason}, state}
+  end
+
+  # Aplica una confirmación/cancelación exitosa al estado: guarda el vuelo, cancela el timer
+  # de la reserva (optimización) y persiste. Devuelve {reservation, new_state}. Lo comparten
+  # confirm/cancel (vía reply_transition) y el resultado de un pago aprobado.
+  defp apply_ok(%Flight{} = flight, reservation_id, state) do
+    reservation = Map.fetch!(flight.reservations, reservation_id)
+    state = %{state | flight: flight, timers: cancel_timer(state.timers, reservation_id)}
+    persist(state, reservation)
+    {reservation, state}
   end
 
   # Cancela el timer de una reserva (si existe) y lo saca del estado. Es una optimización:

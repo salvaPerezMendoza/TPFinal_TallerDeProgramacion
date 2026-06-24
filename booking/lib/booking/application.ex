@@ -16,7 +16,10 @@ defmodule Booking.Application do
       # registran en él al nacer.
       {Registry, keys: :unique, name: Booking.Registry},
       # DynamicSupervisor: crea/supervisa un FlightServer por vuelo, bajo demanda.
-      Booking.FlightSupervisor
+      Booking.FlightSupervisor,
+      # Task.Supervisor de los pagos simulados (Tasks efímeras que lanzan los FlightServer).
+      # Va después de FlightSupervisor: un crash suyo no debe reiniciar los vuelos.
+      {Task.Supervisor, name: Booking.PaymentSupervisor}
     ]
 
     # :rest_for_one → si una pieza base (Persistence/Registry) cae, se reinician también

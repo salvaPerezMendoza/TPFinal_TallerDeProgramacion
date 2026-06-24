@@ -137,6 +137,32 @@ operación recién cuando ya quedó en disco (sostiene "tras reiniciar no se pie
 write-through sincrónico da durabilidad antes de confirmarle al cliente. El costo es mínimo
 a esta escala y, de hacer falta, se particiona."
 
+### D7 — Pago simulado: Task supervisada que avisa, el FlightServer decide
+**Decisión:** `pay` lanza una `Task` bajo `Booking.PaymentSupervisor` (`Task.Supervisor`) que
+duerme 1-5 s y le **manda el resultado** al `FlightServer` (`{:payment_result, id, result}`).
+La Task **no confirma sola**: el `FlightServer` confirma **solo si la reserva sigue
+`:pending`** (re-validación con `Flight.confirm/2`). El timer de expiración **sigue corriendo**
+durante el pago (no se cancela al iniciarlo).
+
+**Por qué la Task (y no dormir dentro del FlightServer):** el `FlightServer` serializa todo el
+vuelo; dormir 1-5 s en `handle_call` lo bloquearía y **congelaría el vuelo entero** (no
+atendería otras reservas ni los timers de expiración). Delegar el trabajo lento a una Task lo
+mantiene receptivo (regla del resumen: "el dueño del estado decide rápido y delega").
+
+**Por qué el timer sigue corriendo:** así la carrera **pago-vs-expiración** la resuelve el
+orden de llegada a la mailbox. Si expira primero, el pago tardío es no-op (la reserva ya no
+está `:pending`); si paga primero, se confirma y se cancela el timer. Nunca quedan dos verdades.
+
+**Tasa de éxito configurable** (`:payment_success_rate`, default **1.0** = siempre `:ok`) para
+que la demo en vivo no dependa del azar; el rechazo se fuerza bajando el knob (o con
+`force: :error` en tests). **Doble-pay:** se registra la reserva "en pago" (`payments`) para no
+lanzar dos Tasks a la vez.
+
+**Cómo se defiende:** "El pago es trabajo lento: corre en una Task supervisada para no bloquear
+el vuelo. La Task solo avisa el resultado; confirmar es decisión del `FlightServer`, que
+re-valida que la reserva siga pendiente. Como el timer no se cancela, la carrera con la
+expiración se resuelve sola y de forma consistente."
+
 ---
 
 ## Defaults menores — **A CONFIRMAR CON EL GRUPO**
