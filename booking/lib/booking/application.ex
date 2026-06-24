@@ -24,8 +24,8 @@ defmodule Booking.Application do
     opts = [strategy: :rest_for_one, name: Booking.Supervisor]
 
     with {:ok, _pid} = ok <- Supervisor.start_link(children, opts) do
-      # Con el árbol ya levantado, reconstruir los vuelos persistidos desde DETS.
-      Booking.Boot.restore()
+      # Con el árbol ya levantado: sembrar (si DETS vacío) y levantar los vuelos.
+      Booking.Boot.run()
       ok
     end
   end
