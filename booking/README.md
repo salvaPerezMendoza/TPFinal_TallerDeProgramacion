@@ -1,21 +1,41 @@
-# Booking
+# Booking — backend (Elixir/OTP)
 
-**TODO: Add description**
+Backend del sistema de reserva de asientos en vuelos. Cliente-servidor en tiempo real
+sobre WebSocket. La arquitectura, el modelo de datos, el protocolo y las decisiones de
+diseño están documentados en [`../docs/`](../docs).
 
-## Installation
+## Requisitos
 
-If [available in Hex](https://hex.pm/docs/publish), the package can be installed
-by adding `booking` to your list of dependencies in `mix.exs`:
+- Elixir `~> 1.19` sobre Erlang/OTP 28.
 
-```elixir
-def deps do
-  [
-    {:booking, "~> 0.1.0"}
-  ]
-end
+## Puesta en marcha
+
+```sh
+mix deps.get      # trae las dependencias (cowboy, jason)
+mix test          # corre los tests
+iex -S mix        # levanta la aplicación en una consola interactiva
 ```
 
-Documentation can be generated with [ExDoc](https://github.com/elixir-lang/ex_doc)
-and published on [HexDocs](https://hexdocs.pm). Once published, the docs can
-be found at <https://hexdocs.pm/booking>.
+## Verificación antes de commitear
 
+```sh
+mix check         # = mix format --check-formatted + mix compile --warnings-as-errors
+```
+
+### Hook de git (una vez por clon)
+
+El repositorio incluye un hook de pre-commit en `../.githooks/` que corre `mix check`
+antes de cada commit. Para activarlo en tu clon, una sola vez:
+
+```sh
+git config core.hooksPath .githooks
+```
+
+(Se configura desde la raíz del repositorio, no desde `booking/`.)
+
+## Dependencias
+
+Solo dos, ambas de runtime:
+
+- **cowboy** — servidor HTTP/WebSocket.
+- **jason** — (de)serialización JSON del protocolo.

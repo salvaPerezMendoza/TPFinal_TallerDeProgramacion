@@ -1,0 +1,4 @@
+#!/bin/sh
+# Aborta el commit si el backend no está formateado o compila con warnings.
+cd booking || exit 1
+exec mix check
