@@ -7,8 +7,9 @@ defmodule Booking.Reservation do
   `:confirmed`, `:cancelled` o `:expired`.
   """
 
-  # Tiempo de vida de una reserva pendiente: 1 minuto (regla del enunciado).
-  @ttl_seconds 60
+  # Plazo por defecto de una reserva pendiente: 1 minuto (regla del enunciado), en
+  # milisegundos para que coincida con el timer del FlightServer (Process.send_after).
+  @default_ttl_ms 60_000
 
   @enforce_keys [:id, :flight_id, :seat_id, :user_id, :created_at, :expires_at]
   defstruct [
@@ -34,13 +35,15 @@ defmodule Booking.Reservation do
         }
 
   @doc """
-  Crea una reserva `:pending`. `expires_at` se calcula como `now + 1 minuto`.
+  Crea una reserva `:pending` con `expires_at = now + ttl_ms`. Ese plazo es la única
+  fuente de verdad del deadline: el mismo valor con el que el `FlightServer` programa el
+  timer de expiración.
 
-  `now` se recibe por parámetro para que la creación sea determinista (testeable);
-  el timer real de expiración es responsabilidad del proceso (FlightServer).
+  `now` y `ttl_ms` se reciben por parámetro para que la creación sea determinista
+  (testeable); disparar el timer real es responsabilidad del proceso (FlightServer).
   """
-  @spec new(String.t(), String.t(), String.t(), String.t(), DateTime.t()) :: t()
-  def new(id, flight_id, seat_id, user_id, %DateTime{} = now) do
+  @spec new(String.t(), String.t(), String.t(), String.t(), DateTime.t(), pos_integer()) :: t()
+  def new(id, flight_id, seat_id, user_id, %DateTime{} = now, ttl_ms) do
     %__MODULE__{
       id: id,
       flight_id: flight_id,
@@ -48,11 +51,11 @@ defmodule Booking.Reservation do
       user_id: user_id,
       status: :pending,
       created_at: now,
-      expires_at: DateTime.add(now, @ttl_seconds, :second)
+      expires_at: DateTime.add(now, ttl_ms, :millisecond)
     }
   end
 
-  @doc "Tiempo de vida (en segundos) de una reserva pendiente."
-  @spec ttl_seconds() :: pos_integer()
-  def ttl_seconds, do: @ttl_seconds
+  @doc "Plazo por defecto (en milisegundos) de una reserva pendiente: 1 minuto."
+  @spec default_ttl_ms() :: pos_integer()
+  def default_ttl_ms, do: @default_ttl_ms
 end

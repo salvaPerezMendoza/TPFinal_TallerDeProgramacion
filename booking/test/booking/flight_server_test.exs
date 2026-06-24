@@ -4,7 +4,8 @@ defmodule Booking.FlightServerTest do
   alias Booking.{Flight, FlightServer}
 
   # Arranca un FlightServer supervisado por el test (se limpia solo al terminar).
-  defp start_server(seat_count \\ 20) do
+  # `opts` puede incluir `:seat_count` y `:ttl_ms` (TTL corto para forzar expiración).
+  defp start_server(opts \\ []) do
     flight =
       Flight.new(%{
         id: "AR1001",
@@ -13,10 +14,10 @@ defmodule Booking.FlightServerTest do
         destination: "BRC",
         departs_at: ~U[2026-07-20 08:30:00Z],
         price: 185_000,
-        seat_count: seat_count
+        seat_count: Keyword.get(opts, :seat_count, 20)
       })
 
-    start_supervised!({FlightServer, flight: flight})
+    start_supervised!({FlightServer, [flight: flight] ++ Keyword.take(opts, [:ttl_ms])})
   end
 
   test "reservar a través del server marca el asiento y devuelve la reserva pendiente" do
@@ -83,5 +84,52 @@ defmodule Booking.FlightServerTest do
     assert length(winners) == 1
     assert length(losers) == 99
     assert FlightServer.get_flight(server).seats["1"].status == :reserved
+  end
+
+  describe "expiración y conflictos" do
+    test "la expiración real (TTL corto) libera el asiento" do
+      server = start_server(ttl_ms: 30)
+      {:ok, res} = FlightServer.reserve_seat(server, "1", "ana")
+      assert FlightServer.get_flight(server).seats["1"].status == :reserved
+
+      Process.sleep(80)
+
+      flight = FlightServer.get_flight(server)
+      assert flight.reservations[res.id].status == :expired
+      assert flight.seats["1"].status == :free
+    end
+
+    test "confirmar una reserva ya expirada falla y no toca el asiento" do
+      server = start_server(ttl_ms: 30)
+      {:ok, res} = FlightServer.reserve_seat(server, "1", "ana")
+      Process.sleep(80)
+
+      assert {:error, :not_pending} = FlightServer.confirm(server, res.id)
+      assert FlightServer.get_flight(server).seats["1"].status == :free
+    end
+
+    test "confirmar-vs-expirar: si confirmo, un {:expire} tardío es no-op" do
+      server = start_server()
+      {:ok, res} = FlightServer.reserve_seat(server, "1", "ana")
+      {:ok, _} = FlightServer.confirm(server, res.id)
+
+      # Simulo que el timer dispara TARDE (después de confirmar): handle_info re-valida
+      # con Flight.expire y, como la reserva ya está :confirmed, no hace nada.
+      send(server, {:expire, res.id})
+
+      # get_flight se procesa después del {:expire} (misma mailbox) → estado estabilizado.
+      flight = FlightServer.get_flight(server)
+      assert flight.reservations[res.id].status == :confirmed
+      assert flight.seats["1"].status == :confirmed
+    end
+
+    test "cancelar-vs-confirmar: si cancelo, confirmar después es no-op" do
+      server = start_server()
+      {:ok, res} = FlightServer.reserve_seat(server, "1", "ana")
+      {:ok, _} = FlightServer.cancel(server, res.id)
+
+      assert {:error, :not_pending} = FlightServer.confirm(server, res.id)
+      assert FlightServer.get_flight(server).seats["1"].status == :free
+    end
   end
 end

@@ -7,9 +7,9 @@ defmodule Booking.Flight do
   sin efectos secundarios ni estado compartido. Las operaciones que pueden fallar
   devuelven `{:ok, _}` | `{:error, motivo}`.
 
-  El tiempo (`now`) y el identificador de reserva se reciben por parámetro para que
-  las transiciones sean deterministas y fáciles de testear; la generación de ids y
-  los timers de expiración son responsabilidad del proceso (FlightServer, Etapa 3).
+  El tiempo (`now`), el `ttl_ms` y el identificador de reserva se reciben por parámetro
+  para que las transiciones sean deterministas y fáciles de testear; generar los ids y
+  disparar los timers de expiración son responsabilidad del proceso (FlightServer).
 
   Invariantes que se preservan:
 
@@ -73,15 +73,22 @@ defmodule Booking.Flight do
     * `{:error, :seat_not_found}` si el asiento no existe.
     * `{:error, :seat_taken}` si ya está reservado o confirmado (lo ganó otro).
   """
-  @spec reserve_seat(t(), String.t(), String.t(), String.t(), DateTime.t()) ::
+  @spec reserve_seat(t(), String.t(), String.t(), String.t(), DateTime.t(), pos_integer()) ::
           {:ok, {t(), Reservation.t()}} | {:error, :seat_not_found | :seat_taken}
-  def reserve_seat(%__MODULE__{} = flight, seat_id, user_id, reservation_id, %DateTime{} = now) do
+  def reserve_seat(
+        %__MODULE__{} = flight,
+        seat_id,
+        user_id,
+        reservation_id,
+        %DateTime{} = now,
+        ttl_ms \\ Reservation.default_ttl_ms()
+      ) do
     case Map.get(flight.seats, seat_id) do
       nil ->
         {:error, :seat_not_found}
 
       %Seat{status: :free} = seat ->
-        reservation = Reservation.new(reservation_id, flight.id, seat_id, user_id, now)
+        reservation = Reservation.new(reservation_id, flight.id, seat_id, user_id, now, ttl_ms)
         seat = %Seat{seat | status: :reserved, held_by: reservation_id}
         flight = put_reservation_and_seat(flight, reservation, seat)
         {:ok, {flight, reservation}}
