@@ -142,6 +142,27 @@ defmodule Booking.Flight do
     end)
   end
 
+  @doc """
+  Reconstruye un vuelo desde su esqueleto (asientos `:free`) aplicando sus reservas
+  persistidas (restore al bootear). El estado de cada asiento lo define **solo su reserva
+  activa**: se aplican las `:confirmed` (→ `:confirmed`) y las `:pending` vigentes
+  (→ `:reserved`); las `:cancelled`/`:expired` y las `:pending` ya vencidas van al historial
+  sin tocar el asiento (el dominio garantiza una sola reserva activa por asiento, así que el
+  orden de iteración no importa).
+
+  Devuelve `{flight, arms, expired}`:
+    * `arms`    — `[{reservation_id, remaining_ms}]`: `:pending` vigentes cuyo timer re-armar;
+    * `expired` — `[Reservation.t()]`: `:pending` ya vencidas, reconstruidas como `:expired`
+      (el proceso las debe persistir).
+  """
+  @spec load(t(), [Reservation.t()], DateTime.t()) ::
+          {t(), [{String.t(), non_neg_integer()}], [Reservation.t()]}
+  def load(%__MODULE__{} = flight, reservations, %DateTime{} = now) do
+    Enum.reduce(reservations, {flight, [], []}, fn reservation, {flight, arms, expired} ->
+      load_one(flight, reservation, now, arms, expired)
+    end)
+  end
+
   # --- Auxiliares privados ---
 
   # Aplica `fun` solo si la reserva existe y está pendiente. Centraliza la regla
@@ -172,5 +193,43 @@ defmodule Booking.Flight do
       | reservations: Map.put(flight.reservations, reservation.id, reservation),
         seats: Map.put(flight.seats, seat.id, seat)
     }
+  end
+
+  # Reconstrucción de una reserva persistida (usado por load/3).
+  defp load_one(
+         %__MODULE__{} = flight,
+         %Reservation{status: :confirmed} = res,
+         _now,
+         arms,
+         expired
+       ) do
+    {occupy(flight, res, :confirmed), arms, expired}
+  end
+
+  defp load_one(%__MODULE__{} = flight, %Reservation{status: :pending} = res, now, arms, expired) do
+    remaining = DateTime.diff(res.expires_at, now, :millisecond)
+
+    if remaining > 0 do
+      {occupy(flight, res, :reserved), [{res.id, remaining} | arms], expired}
+    else
+      expired_res = %Reservation{res | status: :expired}
+      {history(flight, expired_res), arms, [expired_res | expired]}
+    end
+  end
+
+  defp load_one(%__MODULE__{} = flight, %Reservation{} = res, _now, arms, expired) do
+    # :cancelled / :expired → solo historial, no toca el asiento.
+    {history(flight, res), arms, expired}
+  end
+
+  # Pone la reserva en el historial y marca su asiento (es la reserva activa del asiento).
+  defp occupy(%__MODULE__{} = flight, %Reservation{} = res, seat_status) do
+    seat = %Seat{seat_of(flight, res) | status: seat_status, held_by: res.id}
+    put_reservation_and_seat(flight, res, seat)
+  end
+
+  # Pone la reserva solo en el historial; no toca ningún asiento.
+  defp history(%__MODULE__{} = flight, %Reservation{} = res) do
+    %__MODULE__{flight | reservations: Map.put(flight.reservations, res.id, res)}
   end
 end

@@ -12,7 +12,7 @@ defmodule Booking.FlightSupervisor do
 
   use DynamicSupervisor
 
-  alias Booking.{Flight, FlightServer}
+  alias Booking.{Flight, FlightServer, Reservation}
 
   def start_link(_opts) do
     DynamicSupervisor.start_link(__MODULE__, :ok, name: __MODULE__)
@@ -24,17 +24,33 @@ defmodule Booking.FlightSupervisor do
   end
 
   @doc """
-  Arranca el `FlightServer` de `flight` bajo este supervisor; el proceso se registra en
+  Crea un vuelo **nuevo**: persiste su esqueleto en `Booking.Persistence` y arranca su
+  `FlightServer`. Es el punto de entrada para el seed/alta de vuelos (los que después el
+  restore vuelve a levantar). Devuelve lo mismo que `start_flight/2`.
+  """
+  @spec create_flight(Flight.t()) :: DynamicSupervisor.on_start_child()
+  def create_flight(%Flight{} = flight) do
+    :ok = Booking.Persistence.put_flight(flight)
+    start_flight(flight)
+  end
+
+  @doc """
+  Arranca el `FlightServer` de `flight` bajo este supervisor, con sus `reservations`
+  persistidas a reconstruir (vacío para un vuelo nuevo). El proceso se registra en
   `Booking.Registry` por su id. Devuelve `{:ok, pid}`, o `{:error, {:already_started, pid}}`
   si ese vuelo ya está corriendo.
   """
-  @spec start_flight(Flight.t()) :: DynamicSupervisor.on_start_child()
-  def start_flight(%Flight{} = flight) do
+  @spec start_flight(Flight.t(), [Reservation.t()]) :: DynamicSupervisor.on_start_child()
+  def start_flight(%Flight{} = flight, reservations \\ []) do
     # Inyecta el Persistence singleton: los FlightServer de producción persisten
     # (write-through); los que se arrancan sueltos en tests no (persistence: nil por defecto).
     DynamicSupervisor.start_child(
       __MODULE__,
-      {FlightServer, flight: flight, name: via(flight.id), persistence: Booking.Persistence}
+      {FlightServer,
+       flight: flight,
+       name: via(flight.id),
+       persistence: Booking.Persistence,
+       reservations: reservations}
     )
   end
 

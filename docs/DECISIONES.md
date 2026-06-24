@@ -31,25 +31,34 @@ serializa con las demás operaciones; por eso un pago tardío nunca pisa una exp
 **Alternativa descartada:** simular la demora en el frontend. Más simple, pero deja la
 lógica de pago como detalle de UI y aprovecha menos OTP.
 
-### D2 — Reservas `pending` al reiniciar → se expiran al bootear
-**Decisión:** al levantar el servidor, toda reserva que estaba `:pending` pasa a `:expired`
-y libera su asiento. Las `:confirmed`, `:cancelled` y `:expired` se recargan tal cual.
+### D2 — Reservas `pending` al reiniciar → se re-arma su timer por `expires_at - now`
+**Decisión (actualizada en Etapa 4 · restore):** al reconstruir un vuelo desde DETS, cada
+reserva `:pending` persistida se evalúa contra su `expires_at`:
+- si todavía le queda tiempo (`expires_at - now > 0`) → vuelve `:pending`, el asiento queda
+  `:reserved` y se **re-arma** el timer por el tiempo restante;
+- si ya venció → se cierra como `:expired` y libera el asiento (se corrige en disco).
 
-**Por qué:**
-- El timer de expiración (`Process.send_after`) **se pierde** al reiniciar (es estado en
-  memoria, no persistido). Mantener una reserva "pendiente" sin un timer que la limpie
-  podría dejar un asiento **retenido para siempre**.
-- Un reinicio del servidor es un evento **anormal**; lo correcto es no retener asientos de
-  un proceso de pago que quedó interrumpido. Liberar el asiento mantiene las invariantes
-  simples y predecibles.
+Las `:confirmed` se recargan ocupando el asiento; las `:cancelled`/`:expired` quedan en el
+historial sin tocar asientos.
 
-**Cómo se defiende:** "Persistimos todas las reservas con su estado. Las finales se
-recargan idénticas. Las pendientes no pueden sobrevivir tal cual porque su timer vivía en
-memoria; en vez de inventar un timer nuevo, las cerramos como `expired` y liberamos el
-asiento. Es la opción más conservadora y mantiene la invariante de estado final único."
+**Por qué este refinamiento** (antes: "expirar todas las `pending` al bootear"):
+- Desde la Etapa 3, `expires_at = now + ttl` es un **deadline confiable y persistido** (única
+  fuente de verdad, ver D5 y `Reservation`). Con ese dato, re-armar por el tiempo restante es
+  fiel al enunciado (la reserva conserva el minuto real que le quedaba) y no "regala" tiempo.
+- El timer en memoria se pierde al reiniciar, pero **no hace falta inventarlo**: se recalcula
+  desde `expires_at`. Una `pending` cuyo plazo ya pasó se cierra como `:expired` (no queda
+  asiento retenido).
 
-**Alternativas descartadas:** restaurarlas `pending` con un timer nuevo (regala tiempo); o
-recalcular el restante según `expires_at` (más lógica de bordes para poca ganancia).
+**Clave de la reconstrucción:** el estado de cada asiento lo define **solo su reserva
+activa**. Sobre el esqueleto (asientos `:free`) se aplican únicamente las `:confirmed` y las
+`:pending` vigentes; las finalizadas van al historial y **no** tocan el asiento. Como el
+dominio garantiza una sola reserva activa por asiento, el resultado es **independiente del
+orden de iteración** (si dejáramos a una `:expired` poner el asiento en `:free`, un asiento
+expirado-y-luego-reconfirmado podría quedar libre según el orden de procesamiento).
+
+**Cómo se defiende:** "Persistimos cada reserva con su `expires_at`. Al reconstruir, las
+vigentes re-arman su timer por el tiempo restante y las vencidas se cierran como expiradas.
+El asiento lo fija solo la reserva activa, así la reconstrucción es determinista."
 
 ### D3 — WebSocket con `cowboy` puro + `jason`
 **Decisión:** usar la dependencia **`cowboy`** directamente, con un handler

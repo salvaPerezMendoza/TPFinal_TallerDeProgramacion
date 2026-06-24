@@ -1,25 +1,33 @@
 defmodule Booking.FlightServerTest do
   use ExUnit.Case, async: true
 
-  alias Booking.{Flight, FlightServer, Persistence}
+  alias Booking.{Flight, FlightServer, Persistence, Reservation}
 
   # Arranca un FlightServer supervisado por el test (se limpia solo al terminar).
-  # `opts` puede incluir `:seat_count` y `:ttl_ms` (TTL corto para forzar expiración).
+  # `opts` puede incluir `:seat_count`, `:ttl_ms`, `:persistence` y `:reservations`.
   defp start_server(opts \\ []) do
-    flight =
-      Flight.new(%{
-        id: "AR1001",
-        airline_id: "condor",
-        origin: "AEP",
-        destination: "BRC",
-        departs_at: ~U[2026-07-20 08:30:00Z],
-        price: 185_000,
-        seat_count: Keyword.get(opts, :seat_count, 20)
-      })
+    flight = build_flight("AR1001", Keyword.get(opts, :seat_count, 20))
+    extra = Keyword.take(opts, [:ttl_ms, :persistence, :reservations])
+    start_supervised!({FlightServer, [flight: flight] ++ extra})
+  end
 
-    start_supervised!(
-      {FlightServer, [flight: flight] ++ Keyword.take(opts, [:ttl_ms, :persistence])}
-    )
+  defp build_flight(id, seat_count \\ 20) do
+    Flight.new(%{
+      id: id,
+      airline_id: "condor",
+      origin: "AEP",
+      destination: "BRC",
+      departs_at: ~U[2026-07-20 08:30:00Z],
+      price: 185_000,
+      seat_count: seat_count
+    })
+  end
+
+  # Arranca un Persistence aislado (nombre único + carpeta temporal) y devuelve su nombre.
+  defp start_persistence(tmp_dir) do
+    name = :"persistence_#{System.unique_integer([:positive])}"
+    start_supervised!({Persistence, name: name, dir: tmp_dir})
+    name
   end
 
   test "reservar a través del server marca el asiento y devuelve la reserva pendiente" do
@@ -165,6 +173,113 @@ defmodule Booking.FlightServerTest do
       assert [stored] = Persistence.get_reservations(pname)
       assert stored.id == res.id
       assert stored.status == :expired
+    end
+  end
+
+  describe "restore (reconstrucción desde DETS)" do
+    @tag :tmp_dir
+    test "estrella: crear + confirmar → apagar → levantar → sigue confirmado", %{tmp_dir: tmp_dir} do
+      p = start_persistence(tmp_dir)
+      flight = build_flight("AR1001")
+      :ok = Persistence.put_flight(flight, p)
+
+      # Crear + confirmar en el server 1 (write-through persiste todo).
+      s1 = start_supervised!({FlightServer, flight: flight, persistence: p}, id: :s1)
+      {:ok, res} = FlightServer.reserve_seat(s1, "1", "ana")
+      {:ok, _} = FlightServer.confirm(s1, res.id)
+      :ok = stop_supervised(:s1)
+
+      # "Levantar desde disco": releer el vuelo y sus reservas, y reconstruir.
+      [flight2] = Persistence.get_flights(p)
+
+      s2 =
+        start_supervised!(
+          {FlightServer,
+           flight: flight2, reservations: Persistence.get_reservations(p), persistence: p},
+          id: :s2
+        )
+
+      assert FlightServer.get_flight(s2).seats["1"].status == :confirmed
+      assert FlightServer.get_flight(s2).reservations[res.id].status == :confirmed
+    end
+
+    @tag :tmp_dir
+    test "una :pending ya vencida vuelve :expired y libera el asiento", %{tmp_dir: tmp_dir} do
+      p = start_persistence(tmp_dir)
+      flight = build_flight("AR1001")
+      :ok = Persistence.put_flight(flight, p)
+
+      # Reserva :pending con expires_at en el pasado (created hace 60 s, ttl 1 s).
+      past = DateTime.add(DateTime.utc_now(), -60, :second)
+      res = Reservation.new("AR1001-r1", "AR1001", "1", "ana", past, 1000)
+      :ok = Persistence.put_reservation(res, p)
+
+      s = start_supervised!({FlightServer, flight: flight, reservations: [res], persistence: p})
+
+      flight_state = FlightServer.get_flight(s)
+      assert flight_state.seats["1"].status == :free
+      assert flight_state.reservations["AR1001-r1"].status == :expired
+      # La corrección quedó persistida.
+      assert [stored] = Persistence.get_reservations(p)
+      assert stored.status == :expired
+    end
+
+    @tag :tmp_dir
+    test "una :pending vigente vuelve :reserved y el timer re-armado la expira", %{
+      tmp_dir: tmp_dir
+    } do
+      p = start_persistence(tmp_dir)
+      flight = build_flight("AR1001")
+      :ok = Persistence.put_flight(flight, p)
+
+      # Reserva :pending con ~200 ms restantes al momento de restaurar.
+      res = Reservation.new("AR1001-r1", "AR1001", "1", "ana", DateTime.utc_now(), 200)
+      :ok = Persistence.put_reservation(res, p)
+
+      s = start_supervised!({FlightServer, flight: flight, reservations: [res], persistence: p})
+
+      # Recién restaurada: asiento :reserved (timer re-armado por el tiempo restante).
+      assert FlightServer.get_flight(s).seats["1"].status == :reserved
+
+      # Al vencer el tiempo restante, el timer re-armado la expira sola.
+      Process.sleep(260)
+      flight_after = FlightServer.get_flight(s)
+      assert flight_after.seats["1"].status == :free
+      assert flight_after.reservations["AR1001-r1"].status == :expired
+    end
+
+    @tag :tmp_dir
+    test "aplica solo la reserva activa: expirar y re-reservar el mismo asiento → :confirmed",
+         %{tmp_dir: tmp_dir} do
+      p = start_persistence(tmp_dir)
+      flight = build_flight("AR1001")
+      :ok = Persistence.put_flight(flight, p)
+
+      s1 = start_supervised!({FlightServer, flight: flight, persistence: p, ttl_ms: 30}, id: :s1)
+      {:ok, r1} = FlightServer.reserve_seat(s1, "1", "ana")
+      Process.sleep(80)
+      # r1 expiró (timer) → :expired, asiento libre, persistido.
+      {:ok, r2} = FlightServer.reserve_seat(s1, "1", "beto")
+      {:ok, _} = FlightServer.confirm(s1, r2.id)
+      :ok = stop_supervised(:s1)
+
+      # Dos reservas para el asiento "1" en el historial: r1 :expired, r2 :confirmed.
+      reservations = Persistence.get_reservations(p)
+      assert length(reservations) == 2
+
+      [flight2] = Persistence.get_flights(p)
+
+      s2 =
+        start_supervised!(
+          {FlightServer, flight: flight2, reservations: reservations, persistence: p},
+          id: :s2
+        )
+
+      # El asiento queda :confirmed (la reserva activa), sin importar el orden de iteración.
+      assert FlightServer.get_flight(s2).seats["1"].status == :confirmed
+      # Ambas reservas en el historial.
+      assert FlightServer.get_flight(s2).reservations[r1.id].status == :expired
+      assert FlightServer.get_flight(s2).reservations[r2.id].status == :confirmed
     end
   end
 end

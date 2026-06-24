@@ -22,6 +22,11 @@ defmodule Booking.Application do
     # :rest_for_one → si una pieza base (Persistence/Registry) cae, se reinician también
     # los que arrancaron después (el FlightSupervisor y sus vuelos). Ver docs/DECISIONES.md.
     opts = [strategy: :rest_for_one, name: Booking.Supervisor]
-    Supervisor.start_link(children, opts)
+
+    with {:ok, _pid} = ok <- Supervisor.start_link(children, opts) do
+      # Con el árbol ya levantado, reconstruir los vuelos persistidos desde DETS.
+      Booking.Boot.restore()
+      ok
+    end
   end
 end

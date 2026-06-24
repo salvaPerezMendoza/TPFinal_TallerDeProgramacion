@@ -30,16 +30,18 @@ defmodule Booking.FlightServer do
   # --- API de cliente ---
 
   @doc """
-  Arranca el proceso. `opts` debe incluir `:flight` (el `%Booking.Flight{}` inicial) y
+  Arranca el proceso. `opts` debe incluir `:flight` (el `%Booking.Flight{}` esqueleto) y
   puede incluir `:name` (un `{:via, Registry, …}`), `:ttl_ms` (plazo de expiración; por
-  defecto `Booking.Reservation.default_ttl_ms/0`) y `:persistence` (server de
-  `Booking.Persistence` para el write-through; por defecto `nil` = no persiste).
+  defecto `Booking.Reservation.default_ttl_ms/0`), `:persistence` (server de
+  `Booking.Persistence` para el write-through; por defecto `nil` = no persiste) y
+  `:reservations` (reservas persistidas a reconstruir en el `init`; por defecto `[]`).
   """
   def start_link(opts) do
     {flight, opts} = Keyword.pop!(opts, :flight)
     {ttl_ms, opts} = Keyword.pop(opts, :ttl_ms, Reservation.default_ttl_ms())
     {persistence, opts} = Keyword.pop(opts, :persistence, nil)
-    GenServer.start_link(__MODULE__, {flight, ttl_ms, persistence}, opts)
+    {reservations, opts} = Keyword.pop(opts, :reservations, [])
+    GenServer.start_link(__MODULE__, {flight, ttl_ms, persistence, reservations}, opts)
   end
 
   @doc "Inicia una reserva pendiente sobre `seat_id` para `user_id`."
@@ -70,8 +72,28 @@ defmodule Booking.FlightServer do
   # --- Callbacks ---
 
   @impl true
-  def init({%Flight{} = flight, ttl_ms, persistence}) do
-    {:ok, %{flight: flight, seq: 1, ttl_ms: ttl_ms, persistence: persistence, timers: %{}}}
+  def init({%Flight{} = flight, ttl_ms, persistence, reservations}) do
+    now = DateTime.utc_now()
+    {flight, arms, expired} = Flight.load(flight, reservations, now)
+
+    # Re-arma los timers de las :pending vigentes por su tiempo restante (expires_at - now).
+    timers =
+      Map.new(arms, fn {reservation_id, remaining_ms} ->
+        {reservation_id, Process.send_after(self(), {:expire, reservation_id}, remaining_ms)}
+      end)
+
+    state = %{
+      flight: flight,
+      seq: next_seq(reservations),
+      ttl_ms: ttl_ms,
+      persistence: persistence,
+      timers: timers
+    }
+
+    # Las :pending ya vencidas se reconstruyeron como :expired → persistir esa corrección.
+    Enum.each(expired, fn reservation -> persist(state, reservation) end)
+
+    {:ok, state}
   end
 
   @impl true
@@ -168,5 +190,19 @@ defmodule Booking.FlightServer do
 
   defp persist(%{persistence: persistence}, %Reservation{} = reservation) do
     Persistence.put_reservation(reservation, persistence)
+  end
+
+  # Próximo número de id de reserva: max(n) + 1 sobre los sufijos "-r<n>" de las reservas
+  # persistidas, para que los ids nuevos no colisionen con los ya emitidos (D5).
+  defp next_seq(reservations) do
+    reservations
+    |> Enum.map(fn %{id: id} ->
+      case id |> String.split("-r") |> List.last() |> Integer.parse() do
+        {n, _rest} -> n
+        :error -> 0
+      end
+    end)
+    |> Enum.max(fn -> 0 end)
+    |> Kernel.+(1)
   end
 end
