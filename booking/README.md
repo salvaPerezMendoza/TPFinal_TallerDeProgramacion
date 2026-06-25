@@ -4,6 +4,9 @@ Backend del sistema de reserva de asientos en vuelos. Cliente-servidor en tiempo
 sobre WebSocket. La arquitectura, el modelo de datos, el protocolo y las decisiones de
 diseño están documentados en [`../docs/`](../docs).
 
+> Para la visión completa del TP (integrantes, cómo levantar back + front, guion de demo,
+> arquitectura y limitaciones), ver el [README raíz](../README.md).
+
 ## Requisitos
 
 - Elixir `~> 1.19` sobre Erlang/OTP 28.
