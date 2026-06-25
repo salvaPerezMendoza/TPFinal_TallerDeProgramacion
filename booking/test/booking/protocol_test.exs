@@ -25,6 +25,21 @@ defmodule Booking.ProtocolTest do
     })
   end
 
+  defp put_test_flight(persistence, id, destination, departs_at, price) do
+    flight =
+      Flight.new(%{
+        id: id,
+        airline_id: "CDS",
+        origin: "AEP",
+        destination: destination,
+        departs_at: departs_at,
+        price: price,
+        seat_count: 20
+      })
+
+    :ok = Persistence.put_flight(flight, persistence)
+  end
+
   # Arranca un FlightServer (con la persistence aislada) y devuelve {pid, lookup}.
   defp start_flight(persistence, id) do
     pid = start_supervised!({FlightServer, flight: build_flight(id), persistence: persistence})
@@ -72,6 +87,47 @@ defmodule Booking.ProtocolTest do
       assert flight.id == "CDS101"
       assert flight.airline == "Cóndor del Sur"
       assert flight.seat_count == 20
+    end
+
+    @tag :tmp_dir
+    test "filtra por destino", %{tmp_dir: tmp_dir} do
+      p = start_persistence(tmp_dir)
+      put_test_flight(p, "A", "BRC", ~U[2026-07-20 08:00:00Z], 100_000)
+      put_test_flight(p, "B", "MDZ", ~U[2026-07-20 08:00:00Z], 100_000)
+
+      assert {%{flights: flights}, _} =
+               Protocol.handle(%{"type" => "list_flights", "destination" => "BRC"}, base_ctx(p))
+
+      assert Enum.map(flights, & &1.id) == ["A"]
+    end
+
+    @tag :tmp_dir
+    test "filtra por fecha", %{tmp_dir: tmp_dir} do
+      p = start_persistence(tmp_dir)
+      put_test_flight(p, "A", "BRC", ~U[2026-07-20 08:00:00Z], 100_000)
+      put_test_flight(p, "B", "BRC", ~U[2026-07-21 08:00:00Z], 100_000)
+
+      assert {%{flights: flights}, _} =
+               Protocol.handle(%{"type" => "list_flights", "date" => "2026-07-21"}, base_ctx(p))
+
+      assert Enum.map(flights, & &1.id) == ["B"]
+    end
+
+    @tag :tmp_dir
+    test "ordena por precio asc y desc", %{tmp_dir: tmp_dir} do
+      p = start_persistence(tmp_dir)
+      put_test_flight(p, "cara", "BRC", ~U[2026-07-20 08:00:00Z], 300_000)
+      put_test_flight(p, "barata", "BRC", ~U[2026-07-20 08:00:00Z], 100_000)
+
+      {%{flights: asc}, _} =
+        Protocol.handle(%{"type" => "list_flights", "sort" => "price_asc"}, base_ctx(p))
+
+      assert Enum.map(asc, & &1.id) == ["barata", "cara"]
+
+      {%{flights: desc}, _} =
+        Protocol.handle(%{"type" => "list_flights", "sort" => "price_desc"}, base_ctx(p))
+
+      assert Enum.map(desc, & &1.id) == ["cara", "barata"]
     end
   end
 

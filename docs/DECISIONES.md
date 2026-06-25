@@ -163,6 +163,28 @@ el vuelo. La Task solo avisa el resultado; confirmar es decisión del `FlightSer
 re-valida que la reserva siga pendiente. Como el timer no se cancela, la carrera con la
 expiración se resuelve sola y de forma consistente."
 
+### D8 — Búsqueda/orden: filtro server-side en `list_flights` + filtrado client-side en el front
+**Decisión:** el backend implementa el filtro (por `date`, `destination`) y el orden (por
+`price`, `price_asc`/`price_desc`) en `Booking.Protocol` antes de responder `list_flights`
+(cumple enunciado 5.3). El **frontend**, además, mantiene su propio filtro/orden **client-side**
+con `useMemo` sobre los vuelos ya traídos (patrón del resumen de la cátedra), para una UX
+instantánea sin round-trips por cada tecla.
+
+**Por qué ambos:** el server-side cubre el requisito "buscar por fecha/destino" del enunciado y
+queda testeado; el client-side da la experiencia fluida del listado. No se contradicen: el front
+pide todo el catálogo una vez y filtra en memoria; el filtro del backend está disponible para
+quien lo quiera usar por protocolo.
+
+### D9 — Broadcast: `reservation_update` a todos los suscriptos (el cliente filtra)
+**Decisión:** el `FlightServer` manda `seat_update` (estado público del asiento) y
+`reservation_update` (cambio de reserva) **a todos los suscriptos** del vuelo. El cliente
+reacciona a `seat_update` siempre, y a `reservation_update` **solo si el `reservation_id` es
+suyo** (lleva sus ids en memoria).
+
+**Por qué:** evita trackear `user_id` en la suscripción (más simple) y da la misma UX. El único
+costo es que un `reservation_id` ajeno "se ve" en el canal (sin datos del usuario); para el TP
+es aceptable. Alternativa (no tomada): mandar `reservation_update` solo al dueño.
+
 ---
 
 ## Defaults menores — **A CONFIRMAR CON EL GRUPO**

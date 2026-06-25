@@ -27,9 +27,17 @@ defmodule Booking.Protocol do
     {%{type: "registered", user_id: user.id, name: user.name}, %{ctx | user_id: user.id}}
   end
 
-  def handle(%{"type" => "list_flights"}, ctx) do
+  def handle(%{"type" => "list_flights"} = msg, ctx) do
     airline_names = Map.new(Seed.airlines())
-    flights = Enum.map(Persistence.get_flights(ctx.persistence), &flight_json(&1, airline_names))
+
+    flights =
+      ctx.persistence
+      |> Persistence.get_flights()
+      |> filter_by_date(msg["date"])
+      |> filter_by_destination(msg["destination"])
+      |> sort_flights(msg["sort"])
+      |> Enum.map(&flight_json(&1, airline_names))
+
     {%{type: "flights", flights: flights}, ctx}
   end
 
@@ -156,6 +164,22 @@ defmodule Booking.Protocol do
         user
     end
   end
+
+  # Filtros y orden de list_flights (params opcionales del protocolo). `nil`/`""` = sin filtro.
+  defp filter_by_date(flights, date) when date in [nil, ""], do: flights
+
+  defp filter_by_date(flights, date) do
+    Enum.filter(flights, fn flight ->
+      flight.departs_at |> DateTime.to_date() |> Date.to_iso8601() == date
+    end)
+  end
+
+  defp filter_by_destination(flights, destination) when destination in [nil, ""], do: flights
+  defp filter_by_destination(flights, dest), do: Enum.filter(flights, &(&1.destination == dest))
+
+  defp sort_flights(flights, "price_asc"), do: Enum.sort_by(flights, & &1.price, :asc)
+  defp sort_flights(flights, "price_desc"), do: Enum.sort_by(flights, & &1.price, :desc)
+  defp sort_flights(flights, _sort), do: flights
 
   defp error(reason), do: %{type: "error", reason: to_string(reason)}
 
