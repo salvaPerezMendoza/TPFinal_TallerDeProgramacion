@@ -5,11 +5,12 @@ defmodule Booking.WebSocketHandler do
 
   Es **solo cáscara**: decodifica el JSON entrante, delega en `Booking.Protocol.handle/2` (la
   lógica testeable) y vuelve a codificar la respuesta. Su estado **es el contexto** de la
-  conexión (`user_id`, `flight_id` + dependencias `persistence`/`lookup`), que `Protocol`
-  actualiza en cada mensaje. (El broadcast a suscriptores es un sub-paso aparte.)
+  conexión. Además gestiona la **suscripción** al vuelo abierto: al cambiar de vuelo
+  (`open_flight`) suscribe/desuscribe; en `terminate` se desuscribe; y los broadcasts del
+  `FlightServer` (`{:push, _}`) los empuja al navegador en `websocket_info`.
   """
 
-  alias Booking.{FlightSupervisor, Persistence, Protocol}
+  alias Booking.{FlightServer, FlightSupervisor, Persistence, Protocol}
 
   # Request HTTP entrante: le pedimos a Cowboy hacer el upgrade a WebSocket.
   def init(req, _opts) do
@@ -30,17 +31,18 @@ defmodule Booking.WebSocketHandler do
 
   # Frame de texto del cliente: parsear -> despachar -> responder (espejando `ref`).
   def websocket_handle({:text, text}, context) do
-    {response, context} =
+    {response, new_context} =
       case Jason.decode(text) do
         {:ok, message} ->
-          {response, context} = Protocol.handle(message, context)
-          {put_ref(response, message), context}
+          {response, ctx} = Protocol.handle(message, context)
+          {put_ref(response, message), ctx}
 
         {:error, _reason} ->
           {%{type: "error", reason: "invalid_message"}, context}
       end
 
-    {:reply, {:text, Jason.encode!(response)}, context}
+    new_context = sync_subscription(context, new_context)
+    {:reply, {:text, Jason.encode!(response)}, new_context}
   end
 
   # Otros frames (binario/ping/pong): los ignoramos por ahora.
@@ -48,14 +50,48 @@ defmodule Booking.WebSocketHandler do
     {:ok, context}
   end
 
-  # Mensajes Erlang al proceso (ej. futuros broadcasts de un FlightServer): nada por ahora.
+  # Broadcast del FlightServer: lo serializamos y lo empujamos al navegador.
+  def websocket_info({:push, message}, context) do
+    {:reply, {:text, Jason.encode!(message)}, context}
+  end
+
   def websocket_info(_info, context) do
     {:ok, context}
   end
 
-  # La conexión se cerró: limpieza (más adelante: desuscribir).
-  def terminate(_reason, _req, _context) do
+  # La conexión se cerró: desuscribir del vuelo que estuviera mirando.
+  def terminate(_reason, _req, %{flight_id: flight_id}) do
+    unsubscribe_flight(flight_id)
     :ok
+  end
+
+  def terminate(_reason, _req, _context), do: :ok
+
+  # Si `open_flight` cambió el vuelo, desuscribe del anterior y suscribe al nuevo.
+  defp sync_subscription(%{flight_id: old}, %{flight_id: new} = context) when old != new do
+    unsubscribe_flight(old)
+    subscribe_flight(new)
+    context
+  end
+
+  defp sync_subscription(_old_context, context), do: context
+
+  defp subscribe_flight(nil), do: :ok
+
+  defp subscribe_flight(flight_id) do
+    case FlightSupervisor.lookup(flight_id) do
+      {:ok, pid} -> FlightServer.subscribe(pid, self())
+      :error -> :ok
+    end
+  end
+
+  defp unsubscribe_flight(nil), do: :ok
+
+  defp unsubscribe_flight(flight_id) do
+    case FlightSupervisor.lookup(flight_id) do
+      {:ok, pid} -> FlightServer.unsubscribe(pid, self())
+      :error -> :ok
+    end
   end
 
   # Si el pedido traía `ref`, lo espejamos en la respuesta (correlación pedido/respuesta).

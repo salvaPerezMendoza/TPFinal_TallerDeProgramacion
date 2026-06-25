@@ -20,12 +20,16 @@ defmodule Booking.FlightServer do
       que duerme 1-5 s y le manda `{:payment_result, id, result}`. La Task no confirma sola; el
       proceso confirma solo si la reserva sigue `:pending` (re-validación). El timer de
       expiración sigue corriendo durante el pago, así la carrera pago-vs-expiración se resuelve
-      sola. Ver docs/DECISIONES.md D7.
+      sola. Ver docs/DECISIONES.md D7;
+    * **avisa** (broadcast en tiempo real): guarda los pids suscriptos (`subscribe`/`unsubscribe`,
+      con `Process.monitor` para limpiar desconexiones) y en cada cambio les empuja `seat_update`
+      y `reservation_update` (ver docs/protocolo.md). `notify/2` junta write-through + broadcast
+      para no olvidar ningún camino.
 
   Estado del proceso: `%{flight: %Booking.Flight{}, seq: pos_integer, ttl_ms: pos_integer,
   persistence: GenServer.server() | nil, timers: %{reservation_id => reference},
-  payments: MapSet.t()}` (`payments` = reservas con un pago en vuelo). El dominio decide *qué*
-  pasa; este módulo aporta *cuándo*, *con qué identidad* y *dónde se guarda*.
+  payments: MapSet.t(), subscribers: %{pid => reference}}`. El dominio decide *qué* pasa; este
+  módulo aporta *cuándo*, *con qué identidad*, *dónde se guarda* y *a quién se avisa*.
   """
 
   use GenServer
@@ -88,6 +92,14 @@ defmodule Booking.FlightServer do
   @spec get_flight(GenServer.server()) :: Flight.t()
   def get_flight(server), do: GenServer.call(server, :get_flight)
 
+  @doc "Suscribe `pid` a las actualizaciones del vuelo (recibirá `{:push, mensaje}`)."
+  @spec subscribe(GenServer.server(), pid()) :: :ok
+  def subscribe(server, pid), do: GenServer.cast(server, {:subscribe, pid})
+
+  @doc "Desuscribe `pid` de las actualizaciones del vuelo."
+  @spec unsubscribe(GenServer.server(), pid()) :: :ok
+  def unsubscribe(server, pid), do: GenServer.cast(server, {:unsubscribe, pid})
+
   # --- Callbacks ---
 
   @impl true
@@ -107,10 +119,13 @@ defmodule Booking.FlightServer do
       ttl_ms: ttl_ms,
       persistence: persistence,
       timers: timers,
-      payments: MapSet.new()
+      payments: MapSet.new(),
+      subscribers: %{}
     }
 
     # Las :pending ya vencidas se reconstruyeron como :expired → persistir esa corrección.
+    # (Solo persist, no notify: en el boot no hay suscriptos y las demás reservas se cargan
+    # sin re-escribir.)
     Enum.each(expired, fn reservation -> persist(state, reservation) end)
 
     {:ok, state}
@@ -134,7 +149,7 @@ defmodule Booking.FlightServer do
             timers: Map.put(state.timers, reservation_id, timer_ref)
         }
 
-        persist(state, reservation)
+        notify(state, reservation)
         {:reply, {:ok, reservation}, state}
 
       {:error, reason} ->
@@ -191,6 +206,21 @@ defmodule Booking.FlightServer do
   end
 
   @impl true
+  def handle_cast({:subscribe, pid}, state) do
+    if Map.has_key?(state.subscribers, pid) do
+      {:noreply, state}
+    else
+      ref = Process.monitor(pid)
+      {:noreply, %{state | subscribers: Map.put(state.subscribers, pid, ref)}}
+    end
+  end
+
+  @impl true
+  def handle_cast({:unsubscribe, pid}, state) do
+    {:noreply, remove_subscriber(state, pid)}
+  end
+
+  @impl true
   def handle_info({:expire, reservation_id}, state) do
     # Saca el timer del estado (ya disparó) para no acumular refs viejos.
     state = %{state | timers: Map.delete(state.timers, reservation_id)}
@@ -201,7 +231,7 @@ defmodule Booking.FlightServer do
     case Flight.expire(state.flight, reservation_id) do
       {:ok, %Flight{} = flight} ->
         state = %{state | flight: flight}
-        persist(state, Map.fetch!(flight.reservations, reservation_id))
+        notify(state, Map.fetch!(flight.reservations, reservation_id))
         {:noreply, state}
 
       {:error, _reason} ->
@@ -214,6 +244,16 @@ defmodule Booking.FlightServer do
     state = %{state | payments: MapSet.delete(state.payments, reservation_id)}
     {:noreply, apply_payment(result, reservation_id, state)}
   end
+
+  @impl true
+  def handle_info({:DOWN, _ref, :process, pid, _reason}, state) do
+    # Un suscriptor (su conexión) murió: lo sacamos y demonitoreamos. Cubre la desconexión
+    # de un cliente (incluso abrupta), sin tocar su reserva (que la gobierna su timer).
+    {:noreply, remove_subscriber(state, pid)}
+  end
+
+  @impl true
+  def handle_info(_message, state), do: {:noreply, state}
 
   # Pago aprobado: confirma SOLO si la reserva sigue :pending. Si entre el inicio del pago y
   # este resultado la reserva expiró/canceló, Flight.confirm devuelve {:error, :not_pending} y
@@ -267,7 +307,7 @@ defmodule Booking.FlightServer do
   defp apply_ok(%Flight{} = flight, reservation_id, state) do
     reservation = Map.fetch!(flight.reservations, reservation_id)
     state = %{state | flight: flight, timers: cancel_timer(state.timers, reservation_id)}
-    persist(state, reservation)
+    notify(state, reservation)
     {reservation, state}
   end
 
@@ -291,6 +331,48 @@ defmodule Booking.FlightServer do
 
   defp persist(%{persistence: persistence}, %Reservation{} = reservation) do
     Persistence.put_reservation(reservation, persistence)
+  end
+
+  # Persiste el cambio (write-through) Y lo avisa a los suscriptos (broadcast). Junta ambos
+  # efectos para no olvidar ningún camino de cambio de estado en runtime.
+  defp notify(state, %Reservation{} = reservation) do
+    persist(state, reservation)
+    seat = Map.fetch!(state.flight.seats, reservation.seat_id)
+
+    broadcast(state, %{
+      type: "seat_update",
+      flight_id: state.flight.id,
+      seat_id: seat.id,
+      status: to_string(seat.status)
+    })
+
+    # reservation_update solo en estados finales (en :pending ya viaja como reservation_started);
+    # se manda a todos los suscriptos y el cliente filtra por sus propios reservation_id.
+    if reservation.status != :pending do
+      broadcast(state, %{
+        type: "reservation_update",
+        reservation_id: reservation.id,
+        status: to_string(reservation.status)
+      })
+    end
+
+    :ok
+  end
+
+  defp broadcast(state, message) do
+    Enum.each(state.subscribers, fn {pid, _ref} -> send(pid, {:push, message}) end)
+  end
+
+  # Saca un suscriptor (si está) y demonitorea. Idempotente.
+  defp remove_subscriber(state, pid) do
+    case Map.pop(state.subscribers, pid) do
+      {nil, _subscribers} ->
+        state
+
+      {ref, subscribers} ->
+        Process.demonitor(ref, [:flush])
+        %{state | subscribers: subscribers}
+    end
   end
 
   # Próximo número de id de reserva: max(n) + 1 sobre los sufijos "-r<n>" de las reservas

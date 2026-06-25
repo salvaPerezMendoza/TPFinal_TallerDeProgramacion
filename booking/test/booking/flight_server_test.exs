@@ -345,4 +345,65 @@ defmodule Booking.FlightServerTest do
       assert {:ok, _} = FlightServer.cancel(server, res.id, "ana")
     end
   end
+
+  describe "broadcast / suscripción" do
+    test "un suscriptor recibe seat_update cuando otro reserva" do
+      server = start_server()
+      FlightServer.subscribe(server, self())
+
+      {:ok, _} = FlightServer.reserve_seat(server, "1", "ana")
+
+      assert_receive {:push, %{type: "seat_update", seat_id: "1", status: "reserved"}}
+    end
+
+    test "un suscriptor que muere se limpia sin crashear el server" do
+      server = start_server()
+      dead = spawn(fn -> :ok end)
+      ref = Process.monitor(dead)
+      assert_receive {:DOWN, ^ref, :process, ^dead, _}
+
+      FlightServer.subscribe(server, dead)
+      # El server sigue operando normalmente (no crashea por el pid muerto).
+      assert {:ok, _} = FlightServer.reserve_seat(server, "1", "ana")
+      assert Process.alive?(server)
+    end
+
+    test "varios suscriptores reciben el seat_update" do
+      server = start_server()
+      parent = self()
+      other = spawn_link(fn -> relay(parent) end)
+
+      FlightServer.subscribe(server, self())
+      FlightServer.subscribe(server, other)
+      {:ok, _} = FlightServer.reserve_seat(server, "1", "ana")
+
+      assert_receive {:push, %{type: "seat_update", seat_id: "1"}}
+      assert_receive {:relayed, {:push, %{type: "seat_update", seat_id: "1"}}}
+    end
+
+    test "al confirmar el pago se pushea reservation_update + seat_update" do
+      server = start_server()
+      FlightServer.subscribe(server, self())
+      {:ok, res} = FlightServer.reserve_seat(server, "1", "ana")
+      assert_receive {:push, %{type: "seat_update", status: "reserved"}}
+
+      {:ok, :processing} = FlightServer.pay(server, res.id, "ana", force: :ok, delay: 10)
+
+      assert_receive {:push,
+                      %{type: "reservation_update", reservation_id: rid, status: "confirmed"}},
+                     300
+
+      assert rid == res.id
+      assert_receive {:push, %{type: "seat_update", status: "confirmed"}}
+    end
+  end
+
+  # Reenvía al `parent` (con tag) lo que reciba; sirve para tener un 2º suscriptor en tests.
+  defp relay(parent) do
+    receive do
+      message ->
+        send(parent, {:relayed, message})
+        relay(parent)
+    end
+  end
 end
