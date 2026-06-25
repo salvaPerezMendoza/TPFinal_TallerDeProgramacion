@@ -185,6 +185,16 @@ suyo** (lleva sus ids en memoria).
 costo es que un `reservation_id` ajeno "se ve" en el canal (sin datos del usuario); para el TP
 es aceptable. Alternativa (no tomada): mandar `reservation_update` solo al dueño.
 
+### D10 — Frontend: React + Vite, WebSocket nativo, vistas por estado (sin router)
+**Decisión:** frontend en **React (Vite), JavaScript**, con el **WebSocket nativo** del navegador
+(sin librerías de cliente WS) y **CSS simple** propio. **Sin router**: las vistas se eligen por
+estado (`search`/`detail`/`reservations`), porque el flujo es chico. La conexión + estado viven
+en un hook (`useBooking`) con `useReducer`; los componentes son funcionales chicos.
+
+**Por qué:** menos dependencias (solo React/Vite), más fácil de defender; el WS nativo alcanza
+para el protocolo; las pantallas son pocas. El tiempo real se maneja en el reducer: `seat_update`
+actualiza la grilla, `reservation_update` actualiza la reserva activa y "mis reservas".
+
 ---
 
 ## Defaults menores — **A CONFIRMAR CON EL GRUPO**
