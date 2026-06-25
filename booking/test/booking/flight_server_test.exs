@@ -60,7 +60,7 @@ defmodule Booking.FlightServerTest do
     assert FlightServer.get_flight(server).seats["1"].status == :confirmed
 
     {:ok, res2} = FlightServer.reserve_seat(server, "2", "ana")
-    assert {:ok, cancelled} = FlightServer.cancel(server, res2.id)
+    assert {:ok, cancelled} = FlightServer.cancel(server, res2.id, "ana")
     assert cancelled.status == :cancelled
     assert FlightServer.get_flight(server).seats["2"].status == :free
   end
@@ -136,7 +136,7 @@ defmodule Booking.FlightServerTest do
     test "cancelar-vs-confirmar: si cancelo, confirmar después es no-op" do
       server = start_server()
       {:ok, res} = FlightServer.reserve_seat(server, "1", "ana")
-      {:ok, _} = FlightServer.cancel(server, res.id)
+      {:ok, _} = FlightServer.cancel(server, res.id, "ana")
 
       assert {:error, :not_pending} = FlightServer.confirm(server, res.id)
       assert FlightServer.get_flight(server).seats["1"].status == :free
@@ -288,7 +288,7 @@ defmodule Booking.FlightServerTest do
       server = start_server()
       {:ok, res} = FlightServer.reserve_seat(server, "1", "ana")
 
-      assert {:ok, :processing} = FlightServer.pay(server, res.id, force: :ok, delay: 10)
+      assert {:ok, :processing} = FlightServer.pay(server, res.id, "ana", force: :ok, delay: 10)
       Process.sleep(40)
 
       flight = FlightServer.get_flight(server)
@@ -301,7 +301,7 @@ defmodule Booking.FlightServerTest do
       {:ok, res} = FlightServer.reserve_seat(server, "1", "ana")
 
       # delay del pago (100 ms) > ttl (30 ms): la expiración entra primero.
-      assert {:ok, :processing} = FlightServer.pay(server, res.id, force: :ok, delay: 100)
+      assert {:ok, :processing} = FlightServer.pay(server, res.id, "ana", force: :ok, delay: 100)
       Process.sleep(160)
 
       flight = FlightServer.get_flight(server)
@@ -313,7 +313,9 @@ defmodule Booking.FlightServerTest do
       server = start_server()
       {:ok, res} = FlightServer.reserve_seat(server, "1", "ana")
 
-      assert {:ok, :processing} = FlightServer.pay(server, res.id, force: :error, delay: 10)
+      assert {:ok, :processing} =
+               FlightServer.pay(server, res.id, "ana", force: :error, delay: 10)
+
       Process.sleep(40)
 
       flight = FlightServer.get_flight(server)
@@ -325,10 +327,22 @@ defmodule Booking.FlightServerTest do
       server = start_server()
       {:ok, res} = FlightServer.reserve_seat(server, "1", "ana")
 
-      assert {:ok, :processing} = FlightServer.pay(server, res.id, force: :ok, delay: 50)
+      assert {:ok, :processing} = FlightServer.pay(server, res.id, "ana", force: :ok, delay: 50)
 
       assert {:error, :payment_in_progress} =
-               FlightServer.pay(server, res.id, force: :ok, delay: 50)
+               FlightServer.pay(server, res.id, "ana", force: :ok, delay: 50)
+    end
+
+    test "pagar/cancelar una reserva de otro usuario falla con :not_owner" do
+      server = start_server()
+      {:ok, res} = FlightServer.reserve_seat(server, "1", "ana")
+
+      assert {:error, :not_owner} =
+               FlightServer.pay(server, res.id, "beto", force: :ok, delay: 10)
+
+      assert {:error, :not_owner} = FlightServer.cancel(server, res.id, "beto")
+      # La dueña sí puede cancelar.
+      assert {:ok, _} = FlightServer.cancel(server, res.id, "ana")
     end
   end
 end

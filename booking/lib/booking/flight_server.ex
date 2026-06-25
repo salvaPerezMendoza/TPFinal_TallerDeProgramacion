@@ -63,24 +63,25 @@ defmodule Booking.FlightServer do
     GenServer.call(server, {:confirm, reservation_id})
   end
 
-  @doc "Cancela una reserva pendiente."
-  @spec cancel(GenServer.server(), String.t()) ::
-          {:ok, Reservation.t()} | {:error, :reservation_not_found | :not_pending}
-  def cancel(server, reservation_id) do
-    GenServer.call(server, {:cancel, reservation_id})
+  @doc "Cancela una reserva pendiente del usuario `user_id` (debe ser suya)."
+  @spec cancel(GenServer.server(), String.t(), String.t()) ::
+          {:ok, Reservation.t()}
+          | {:error, :reservation_not_found | :not_owner | :not_pending}
+  def cancel(server, reservation_id, user_id) do
+    GenServer.call(server, {:cancel, reservation_id, user_id})
   end
 
   @doc """
-  Inicia el pago simulado de una reserva pendiente: lanza una `Task` supervisada que, tras
-  1-5 s, le manda el resultado al `FlightServer` (que confirma si la reserva sigue pendiente).
-  Devuelve `{:ok, :processing}` (es asíncrono). `opts` admite `:force` (`:ok`/`:error`) y
-  `:delay` (ms) para tests.
+  Inicia el pago simulado de una reserva pendiente del usuario `user_id` (debe ser suya):
+  lanza una `Task` supervisada que, tras 1-5 s, le manda el resultado al `FlightServer` (que
+  confirma si la reserva sigue pendiente). Devuelve `{:ok, :processing}` (es asíncrono).
+  `opts` admite `:force` (`:ok`/`:error`) y `:delay` (ms) para tests.
   """
-  @spec pay(GenServer.server(), String.t(), keyword()) ::
+  @spec pay(GenServer.server(), String.t(), String.t(), keyword()) ::
           {:ok, :processing}
-          | {:error, :reservation_not_found | :not_pending | :payment_in_progress}
-  def pay(server, reservation_id, opts \\ []) do
-    GenServer.call(server, {:pay, reservation_id, opts})
+          | {:error, :reservation_not_found | :not_owner | :not_pending | :payment_in_progress}
+  def pay(server, reservation_id, user_id, opts \\ []) do
+    GenServer.call(server, {:pay, reservation_id, user_id, opts})
   end
 
   @doc "Devuelve el `%Booking.Flight{}` actual (inspección / detalle del vuelo)."
@@ -147,14 +148,32 @@ defmodule Booking.FlightServer do
   end
 
   @impl true
-  def handle_call({:cancel, reservation_id}, _from, state) do
-    reply_transition(Flight.cancel(state.flight, reservation_id), reservation_id, state)
+  def handle_call({:cancel, reservation_id, user_id}, _from, state) do
+    case Map.get(state.flight.reservations, reservation_id) do
+      nil ->
+        {:reply, {:error, :reservation_not_found}, state}
+
+      %Reservation{user_id: owner} when owner != user_id ->
+        {:reply, {:error, :not_owner}, state}
+
+      %Reservation{} ->
+        reply_transition(Flight.cancel(state.flight, reservation_id), reservation_id, state)
+    end
   end
 
   @impl true
-  def handle_call({:pay, reservation_id, opts}, _from, state) do
+  def handle_call({:pay, reservation_id, user_id, opts}, _from, state) do
     case Map.get(state.flight.reservations, reservation_id) do
-      %Reservation{status: :pending} ->
+      nil ->
+        {:reply, {:error, :reservation_not_found}, state}
+
+      %Reservation{user_id: owner} when owner != user_id ->
+        {:reply, {:error, :not_owner}, state}
+
+      %Reservation{status: status} when status != :pending ->
+        {:reply, {:error, :not_pending}, state}
+
+      %Reservation{} ->
         if MapSet.member?(state.payments, reservation_id) do
           # Doble-pay: ya hay una Task de pago en vuelo para esta reserva.
           {:reply, {:error, :payment_in_progress}, state}
@@ -163,12 +182,6 @@ defmodule Booking.FlightServer do
           state = %{state | payments: MapSet.put(state.payments, reservation_id)}
           {:reply, {:ok, :processing}, state}
         end
-
-      nil ->
-        {:reply, {:error, :reservation_not_found}, state}
-
-      %Reservation{} ->
-        {:reply, {:error, :not_pending}, state}
     end
   end
 

@@ -1,52 +1,224 @@
 defmodule Booking.ProtocolTest do
   use ExUnit.Case, async: true
 
-  alias Booking.{Flight, Protocol}
+  alias Booking.{Flight, FlightServer, Persistence, Protocol}
 
-  defp sample_flights do
-    [
-      Flight.new(%{
-        id: "CDS101",
-        airline_id: "CDS",
-        origin: "AEP",
-        destination: "BRC",
-        departs_at: ~U[2026-07-20 08:00:00Z],
-        price: 185_000,
-        seat_count: 48
-      }),
-      Flight.new(%{
-        id: "LIT112",
-        airline_id: "LIT",
-        origin: "COR",
-        destination: "MDZ",
-        departs_at: ~U[2026-07-21 14:00:00Z],
-        price: 99_000,
-        seat_count: 72
-      })
-    ]
+  defp base_ctx(persistence) do
+    %{user_id: nil, flight_id: nil, persistence: persistence, lookup: fn _ -> :error end}
   end
 
-  test "list_flights devuelve un item por vuelo con la aerolínea mapeada a nombre" do
-    assert %{type: "flights", flights: flights} =
-             Protocol.handle(%{"type" => "list_flights"}, sample_flights())
-
-    assert length(flights) == 2
-
-    first = hd(flights)
-    assert first.id == "CDS101"
-    assert first.airline == "Cóndor del Sur"
-    assert first.origin == "AEP"
-    assert first.destination == "BRC"
-    assert first.price == 185_000
-    assert first.seat_count == 48
-    assert first.departs_at == "2026-07-20T08:00:00Z"
+  defp start_persistence(tmp_dir) do
+    name = :"persistence_#{System.unique_integer([:positive])}"
+    start_supervised!({Persistence, name: name, dir: tmp_dir})
+    name
   end
 
-  test "list_flights sin vuelos devuelve la lista vacía" do
-    assert %{type: "flights", flights: []} = Protocol.handle(%{"type" => "list_flights"}, [])
+  defp build_flight(id) do
+    Flight.new(%{
+      id: id,
+      airline_id: "CDS",
+      origin: "AEP",
+      destination: "BRC",
+      departs_at: ~U[2026-07-20 08:00:00Z],
+      price: 185_000,
+      seat_count: 20
+    })
   end
 
-  test "un mensaje desconocido devuelve error" do
-    assert %{type: "error", reason: "invalid_message"} = Protocol.handle(%{"type" => "nope"}, [])
+  # Arranca un FlightServer (con la persistence aislada) y devuelve {pid, lookup}.
+  defp start_flight(persistence, id) do
+    pid = start_supervised!({FlightServer, flight: build_flight(id), persistence: persistence})
+
+    lookup = fn
+      ^id -> {:ok, pid}
+      _ -> :error
+    end
+
+    {pid, lookup}
+  end
+
+  describe "register" do
+    @tag :tmp_dir
+    test "crea un usuario y guarda el user_id en el contexto", %{tmp_dir: tmp_dir} do
+      ctx = base_ctx(start_persistence(tmp_dir))
+
+      assert {%{type: "registered", user_id: user_id, name: "Ana"}, new_ctx} =
+               Protocol.handle(%{"type" => "register", "name" => "Ana"}, ctx)
+
+      assert is_binary(user_id)
+      assert new_ctx.user_id == user_id
+    end
+
+    @tag :tmp_dir
+    test "registrarse con el mismo nombre reusa el user_id", %{tmp_dir: tmp_dir} do
+      ctx = base_ctx(start_persistence(tmp_dir))
+
+      {%{user_id: id1}, _} = Protocol.handle(%{"type" => "register", "name" => "Ana"}, ctx)
+      {%{user_id: id2}, _} = Protocol.handle(%{"type" => "register", "name" => "Ana"}, ctx)
+
+      assert id1 == id2
+    end
+  end
+
+  describe "list_flights" do
+    @tag :tmp_dir
+    test "devuelve los vuelos persistidos con la aerolínea mapeada", %{tmp_dir: tmp_dir} do
+      p = start_persistence(tmp_dir)
+      :ok = Persistence.put_flight(build_flight("CDS101"), p)
+
+      assert {%{type: "flights", flights: [flight]}, _ctx} =
+               Protocol.handle(%{"type" => "list_flights"}, base_ctx(p))
+
+      assert flight.id == "CDS101"
+      assert flight.airline == "Cóndor del Sur"
+      assert flight.seat_count == 20
+    end
+  end
+
+  describe "open_flight" do
+    @tag :tmp_dir
+    test "devuelve detalle + asientos y guarda flight_id", %{tmp_dir: tmp_dir} do
+      p = start_persistence(tmp_dir)
+      {_pid, lookup} = start_flight(p, "CDS101")
+      ctx = %{base_ctx(p) | lookup: lookup}
+
+      assert {%{type: "flight_detail", flight: flight, seats: seats}, new_ctx} =
+               Protocol.handle(%{"type" => "open_flight", "flight_id" => "CDS101"}, ctx)
+
+      assert flight.id == "CDS101"
+      assert length(seats) == 20
+      assert Enum.all?(seats, &(&1.status == "free"))
+      assert new_ctx.flight_id == "CDS101"
+    end
+
+    @tag :tmp_dir
+    test "vuelo inexistente devuelve flight_not_found", %{tmp_dir: tmp_dir} do
+      assert {%{type: "error", reason: "flight_not_found"}, _} =
+               Protocol.handle(
+                 %{"type" => "open_flight", "flight_id" => "NOPE"},
+                 base_ctx(start_persistence(tmp_dir))
+               )
+    end
+  end
+
+  describe "reserve_seat" do
+    @tag :tmp_dir
+    test "inicia la reserva", %{tmp_dir: tmp_dir} do
+      p = start_persistence(tmp_dir)
+      {_pid, lookup} = start_flight(p, "CDS101")
+      ctx = %{base_ctx(p) | lookup: lookup, user_id: "user_ana"}
+
+      assert {%{
+                type: "reservation_started",
+                reservation_id: rid,
+                seat_id: "1",
+                flight_id: "CDS101"
+              }, _} =
+               Protocol.handle(
+                 %{"type" => "reserve_seat", "flight_id" => "CDS101", "seat_id" => "1"},
+                 ctx
+               )
+
+      assert rid == "CDS101-r1"
+    end
+
+    @tag :tmp_dir
+    test "sin registrarse devuelve not_registered", %{tmp_dir: tmp_dir} do
+      p = start_persistence(tmp_dir)
+      {_pid, lookup} = start_flight(p, "CDS101")
+      ctx = %{base_ctx(p) | lookup: lookup}
+
+      assert {%{type: "error", reason: "not_registered"}, _} =
+               Protocol.handle(
+                 %{"type" => "reserve_seat", "flight_id" => "CDS101", "seat_id" => "1"},
+                 ctx
+               )
+    end
+
+    @tag :tmp_dir
+    test "asiento ya tomado devuelve seat_taken", %{tmp_dir: tmp_dir} do
+      p = start_persistence(tmp_dir)
+      {pid, lookup} = start_flight(p, "CDS101")
+      {:ok, _} = FlightServer.reserve_seat(pid, "1", "otro")
+      ctx = %{base_ctx(p) | lookup: lookup, user_id: "user_ana"}
+
+      assert {%{type: "error", reason: "seat_taken"}, _} =
+               Protocol.handle(
+                 %{"type" => "reserve_seat", "flight_id" => "CDS101", "seat_id" => "1"},
+                 ctx
+               )
+    end
+  end
+
+  describe "pay" do
+    @tag :tmp_dir
+    test "devuelve el ack payment_started", %{tmp_dir: tmp_dir} do
+      p = start_persistence(tmp_dir)
+      {pid, lookup} = start_flight(p, "CDS101")
+      {:ok, res} = FlightServer.reserve_seat(pid, "1", "user_ana")
+      ctx = %{base_ctx(p) | lookup: lookup, user_id: "user_ana"}
+
+      assert {%{type: "payment_started", reservation_id: rid}, _} =
+               Protocol.handle(%{"type" => "pay", "reservation_id" => res.id}, ctx)
+
+      assert rid == res.id
+    end
+
+    @tag :tmp_dir
+    test "reserva ajena devuelve not_owner", %{tmp_dir: tmp_dir} do
+      p = start_persistence(tmp_dir)
+      {pid, lookup} = start_flight(p, "CDS101")
+      {:ok, res} = FlightServer.reserve_seat(pid, "1", "user_ana")
+      ctx = %{base_ctx(p) | lookup: lookup, user_id: "user_beto"}
+
+      assert {%{type: "error", reason: "not_owner"}, _} =
+               Protocol.handle(%{"type" => "pay", "reservation_id" => res.id}, ctx)
+    end
+  end
+
+  describe "cancel" do
+    @tag :tmp_dir
+    test "cancela y devuelve reservation_update cancelled", %{tmp_dir: tmp_dir} do
+      p = start_persistence(tmp_dir)
+      {pid, lookup} = start_flight(p, "CDS101")
+      {:ok, res} = FlightServer.reserve_seat(pid, "1", "user_ana")
+      ctx = %{base_ctx(p) | lookup: lookup, user_id: "user_ana"}
+
+      assert {%{type: "reservation_update", reservation_id: rid, status: "cancelled"}, _} =
+               Protocol.handle(%{"type" => "cancel", "reservation_id" => res.id}, ctx)
+
+      assert rid == res.id
+    end
+  end
+
+  describe "my_reservations" do
+    @tag :tmp_dir
+    test "devuelve solo las reservas del usuario", %{tmp_dir: tmp_dir} do
+      p = start_persistence(tmp_dir)
+      {pid, lookup} = start_flight(p, "CDS101")
+      {:ok, _} = FlightServer.reserve_seat(pid, "1", "user_ana")
+      {:ok, _} = FlightServer.reserve_seat(pid, "2", "user_beto")
+      ctx = %{base_ctx(p) | lookup: lookup, user_id: "user_ana"}
+
+      assert {%{type: "my_reservations", reservations: reservations}, _} =
+               Protocol.handle(%{"type" => "my_reservations"}, ctx)
+
+      assert length(reservations) == 1
+      assert hd(reservations).seat_id == "1"
+    end
+
+    @tag :tmp_dir
+    test "sin registrarse devuelve not_registered", %{tmp_dir: tmp_dir} do
+      assert {%{type: "error", reason: "not_registered"}, _} =
+               Protocol.handle(
+                 %{"type" => "my_reservations"},
+                 base_ctx(start_persistence(tmp_dir))
+               )
+    end
+  end
+
+  test "un mensaje desconocido devuelve invalid_message" do
+    assert {%{type: "error", reason: "invalid_message"}, _} =
+             Protocol.handle(%{"type" => "nope"}, base_ctx(nil))
   end
 end
