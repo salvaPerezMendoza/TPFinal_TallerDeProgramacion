@@ -5,14 +5,14 @@
 
 ## Resumen de dónde vive cada cosa
 
-| Entidad | Estática/Dinámica | Proceso dueño en memoria | ¿Se persiste en DETS? |
-|---------|-------------------|--------------------------|------------------------|
-| `Airline` | estática | `Catalog` (catálogo fijo) | embebida con los vuelos / catálogo fijo |
-| `Airport` | estática | `Catalog` (catálogo fijo) | catálogo fijo |
-| `Flight` | estática | `Catalog` | sí (tabla `flights`) |
+| Entidad | Estática/Dinámica | Dónde vive en memoria | ¿Se persiste en DETS? |
+|---------|-------------------|------------------------|------------------------|
+| `Airline` | estática | `Booking.Seed` (lista fija en código, sin proceso propio) | embebida con los vuelos / catálogo fijo |
+| `Airport` | estática | `Booking.Seed` (lista fija en código, sin proceso propio) | catálogo fijo |
+| `Flight` | estática | se lee on-demand de `Booking.Persistence`; cada vuelo activo también la tiene embebida en su `FlightServer` | sí (tabla `flights`) |
 | `Seat` | dinámica | `FlightServer` del vuelo | **derivado** (no tiene tabla propia, ver abajo) |
 | `Reservation` | dinámica | `FlightServer` del vuelo | sí (tabla `reservations`) |
-| `User` | dinámica | `UserServer` | sí (tabla `users`) |
+| `User` | dinámica | se resuelve on-demand contra `Booking.Persistence` (sin proceso propio) | sí (tabla `users`) |
 
 ## Entidades
 

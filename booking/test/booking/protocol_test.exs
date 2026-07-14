@@ -157,6 +157,30 @@ defmodule Booking.ProtocolTest do
     end
   end
 
+  describe "close_flight" do
+    @tag :tmp_dir
+    test "limpia el flight_id del contexto (desuscribe el vuelo abierto)", %{tmp_dir: tmp_dir} do
+      p = start_persistence(tmp_dir)
+      {_pid, lookup} = start_flight(p, "CDS101")
+      ctx = %{base_ctx(p) | lookup: lookup, flight_id: "CDS101"}
+
+      assert {%{type: "closed"}, new_ctx} =
+               Protocol.handle(%{"type" => "close_flight", "flight_id" => "CDS101"}, ctx)
+
+      assert new_ctx.flight_id == nil
+    end
+
+    @tag :tmp_dir
+    test "es un no-op seguro si no había ningún vuelo abierto", %{tmp_dir: tmp_dir} do
+      ctx = base_ctx(start_persistence(tmp_dir))
+
+      assert {%{type: "closed"}, new_ctx} =
+               Protocol.handle(%{"type" => "close_flight", "flight_id" => "NOPE"}, ctx)
+
+      assert new_ctx.flight_id == nil
+    end
+  end
+
   describe "reserve_seat" do
     @tag :tmp_dir
     test "inicia la reserva", %{tmp_dir: tmp_dir} do

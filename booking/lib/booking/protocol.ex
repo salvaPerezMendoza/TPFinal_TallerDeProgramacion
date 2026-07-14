@@ -59,6 +59,13 @@ defmodule Booking.Protocol do
     end
   end
 
+  def handle(%{"type" => "close_flight"}, ctx) do
+    # Cancela la suscripción al vuelo abierto (ver docs/protocolo.md). No valida el
+    # `flight_id` recibido contra el del contexto: cerrar siempre es seguro, incluso si
+    # ya estaba cerrado o si el cliente manda un id viejo.
+    {%{type: "closed"}, %{ctx | flight_id: nil}}
+  end
+
   def handle(%{"type" => "reserve_seat"} = msg, ctx) do
     response =
       require_user(ctx, fn ->

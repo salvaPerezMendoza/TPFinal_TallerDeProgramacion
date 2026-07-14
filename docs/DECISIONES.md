@@ -81,8 +81,9 @@ agrega `Plug` para defender).
 
 ### D4 — Supervisor raíz con estrategia `:rest_for_one`
 **Decisión:** el supervisor raíz usa `:rest_for_one` con los hijos ordenados por
-dependencia: `Persistence` → `Registry` → `UserServer` → `Catalog` → `FlightSupervisor` →
-`PaymentSupervisor` → `WebEndpoint`.
+dependencia: `Persistence` → `Registry` → `FlightSupervisor` → `PaymentSupervisor` →
+`WebEndpoint` (en el código final no hay `UserServer` ni `Catalog` separados — ver
+docs/arquitectura.md §3.7 — pero el criterio de orden por dependencia es el mismo).
 
 **Por qué:**
 - Hay una **cadena de dependencias**: los `FlightServer` se registran en `Registry` y

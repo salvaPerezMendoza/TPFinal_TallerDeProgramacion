@@ -5,7 +5,10 @@ export default function FlightDetail({ state, actions }) {
   const { flight, seats } = state.flightDetail;
   const { reservation, selectedSeat, myReservations } = state;
 
-  const hasPending = reservation && reservation.status === "pending";
+  // OJO: comparar también el flight_id — si no, una reserva pendiente en OTRO vuelo
+  // bloquea por error la selección de asientos acá (bug detectado en la auditoría).
+  const hasPending =
+    reservation && reservation.status === "pending" && reservation.flight_id === flight.id;
 
   // Asientos del usuario en este vuelo (pendientes o confirmados) → se marcan "tuyo".
   const ownSeatIds = new Set(

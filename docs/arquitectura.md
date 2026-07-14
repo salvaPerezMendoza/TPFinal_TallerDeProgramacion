@@ -14,12 +14,12 @@
  │  "mis reservas"            │   JSON         │  (traduce JSON <-> dominio)   │
  └───────────────────────────┘                │            │                  │
                                                │            v                  │
-                                               │  Dominio (GenServers OTP)     │
-                                               │  Catalog / FlightServer /     │
-                                               │  UserServer                   │
+                                               │  Dominio: FlightServer        │
+                                               │  (un proceso por vuelo)       │
                                                │            │                  │
                                                │            v                  │
                                                │  Persistence (DETS)           │
+                                               │  (vuelos, usuarios, reservas) │
                                                └──────────────────────────────┘
 ```
 
@@ -37,8 +37,6 @@ Booking.Application                       (punto de entrada OTP)
 └── Booking.Supervisor                    (supervisor raíz, strategy: :rest_for_one)
     ├── Booking.Persistence               (GenServer: dueño de las tablas DETS)
     ├── Booking.Registry                  (Registry: {:flight, id} -> pid del FlightServer)
-    ├── Booking.UserServer                (GenServer: usuarios registrados)
-    ├── Booking.Catalog                   (GenServer: metadata estática de vuelos)
     ├── Booking.FlightSupervisor          (DynamicSupervisor: 1 FlightServer por vuelo)
     │   ├── Booking.FlightServer (vuelo AR1001)
     │   ├── Booking.FlightServer (vuelo AR1002)
@@ -56,9 +54,9 @@ ese supervisor arranca a sus hijos en el orden listado (el orden importa, ver §
 | Capa | Procesos | Rol |
 |------|----------|-----|
 | **Conexión** | `WebEndpoint` + 1 proceso por conexión (Cowboy/Ranch) | Hablan WebSocket/JSON con el navegador. No tienen lógica de dominio: traducen mensajes y reenvían. |
-| **Dominio** | `Catalog`, `FlightServer`, `UserServer` | Dueños del estado y de las reglas. Única fuente de verdad. |
+| **Dominio** | `FlightServer` (uno por vuelo) | Dueño del estado dinámico de ese vuelo (asientos, reservas, timers, suscriptores) y de sus reglas, vía `Booking.Flight` (dominio puro). Única fuente de verdad de ese vuelo. |
 | **Auxiliares** | `PaymentSupervisor` (tareas de pago), timers de expiración | Trabajo puntual o diferido que no debe bloquear al dueño del estado. |
-| **Infraestructura** | `Supervisor`, `FlightSupervisor`, `Registry`, `Persistence` | Organización, ruteo, tolerancia a fallos y persistencia. |
+| **Infraestructura** | `Supervisor`, `FlightSupervisor`, `Registry`, `Persistence` | Organización, ruteo, tolerancia a fallos y persistencia. El catálogo de vuelos y los usuarios registrados se leen/escriben directo contra `Persistence` desde `Booking.Protocol`, sin un proceso propio: son consultas de baja contención que no necesitan más serialización que la que ya da `Persistence` (ver §3.7). |
 
 ## 3. Por qué cada pieza (defensa oral)
 
@@ -141,13 +139,26 @@ reserva se persiste).
 > *(DETS no visto en clase — a defender.)* DETS = *Disk-based ETS*: tablas clave-valor
 > persistidas en archivo, propiedad de un proceso.
 
-### 3.7. `Catalog` y `UserServer`
-- **`Catalog`**: guarda la info **inmutable** de los vuelos (aerolínea, origen/destino,
-  fecha, precio, cantidad de asientos). Resuelve listar / buscar por fecha o destino /
-  ordenar por precio: son **lecturas baratas** que no necesitan tocar los `FlightServer`.
-  También siembra los vuelos en el primer arranque.
-- **`UserServer`**: usuarios registrados (baja contención → un solo proceso alcanza), con
-  write-through a DETS.
+### 3.7. Catálogo y usuarios: sin proceso propio
+Esta sección documentaba originalmente un `Catalog` y un `UserServer` como `GenServer`
+separados. En el código final **no existen**: el catálogo de vuelos y los usuarios
+registrados se resuelven directo contra `Booking.Persistence`, sin proceso intermedio.
+
+- **Catálogo (aerolíneas / aeropuertos / vuelos):** aerolíneas y aeropuertos son datos
+  **estáticos**, embebidos como listas fijas en `Booking.Seed` (no hay nada que mutar, así
+  que no hace falta proceso). Los vuelos sembrados sí se persisten (tabla `flights`);
+  `list_flights` los lee con `Persistence.get_flights/1` y filtra/ordena con funciones
+  puras de `Booking.Protocol` (`filter_by_date/2`, `filter_by_destination/2`,
+  `sort_flights/2`) — son lecturas baratas que no necesitan tocar ningún `FlightServer`.
+- **Usuarios:** `Booking.Protocol.find_or_create_user/2` busca por nombre con
+  `Persistence.get_users/1` y, si no existe, lo crea con `Persistence.put_user/2`
+  (write-through). Es baja contención (registrarse es poco frecuente), así que no hace
+  falta un proceso propio: `Persistence` ya serializa esa escritura como cualquier otra.
+
+**Por qué se simplificó así:** ambos son casos de baja contención y consultas simples;
+sumar un `GenServer` por cada uno sería una capa de indirección sin beneficio real de
+consistencia (`Persistence` ya serializa la E/S) — coherente con la regla de
+"simplicidad antes que sofisticación" del proyecto.
 
 ### 3.8. `PaymentSupervisor` (`Task.Supervisor`) — pago simulado
 El pago simulado tarda 1-5 s. Ese tiempo **no debe bloquear** al `FlightServer` (mientras
@@ -171,10 +182,10 @@ y lo manda al navegador.
 
 ## 4. Estrategia del supervisor raíz: `:rest_for_one`
 
-Los hijos están **ordenados por dependencia**: `Persistence` → `Registry` → `UserServer`
-→ `Catalog` → `FlightSupervisor` → `PaymentSupervisor` → `WebEndpoint`. Con
-`:rest_for_one`, si un hijo cae, se reinician **él y los que arrancaron después** (los que
-dependen de él), pero no los anteriores.
+Los hijos están **ordenados por dependencia**: `Persistence` → `Registry` →
+`FlightSupervisor` → `PaymentSupervisor` → `WebEndpoint`. Con `:rest_for_one`, si un hijo
+cae, se reinician **él y los que arrancaron después** (los que dependen de él), pero no
+los anteriores.
 
 - **Por qué importa el orden:** los `FlightServer` se registran en `Registry`. Si `Registry`
   crasheara, los `FlightServer` quedarían "vivos pero no encontrables". Con `:rest_for_one`,
